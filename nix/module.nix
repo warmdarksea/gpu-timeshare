@@ -30,7 +30,7 @@
 # and then any OpenAI client, with base_url https://HOST:8100/v1 and that
 # token as its API key, trusting /var/lib/gpu-timeshare/tls/timeshare.crt
 # (self-signed, made on the first start, unless tls.certFile is set).
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, utils, ... }:
 let
   cfg = config.services.gpu-timeshare;
   inherit (lib) mkOption types;
@@ -378,7 +378,8 @@ in
       } // m.environment;
       serviceConfig = lib.mkMerge [
         {
-          ExecStart = lib.escapeShellArgs (map (lib.replaceStrings [ "{socket}" ] [ (socketOf name) ]) m.command);
+          # systemd's quoting: % and $ in an argument stay literal
+          ExecStart = utils.escapeSystemdExecArgs (map (lib.replaceStrings [ "{socket}" ] [ (socketOf name) ]) m.command);
           ExecStartPre = "-${pkgs.coreutils}/bin/rm -f ${socketOf name}";
           Restart = "no";
           TimeoutStopSec = 60;
