@@ -97,7 +97,7 @@ type TLS struct {
 type Scheduler struct {
 	Capacity       float64  `toml:"capacity"`        // what the loaded models' costs must fit in
 	Idle           Duration `toml:"idle"`            // stop a model after this long with no work (0: never)
-	Rotation       Duration `toml:"rotation"`        // a busy model gives way after this, if others wait
+	MaxTimeslice   Duration `toml:"max_timeslice"`   // the models on the card give way after this, if another model waits
 	MaxAttempts    int      `toml:"max_attempts"`    // per request, before it fails
 	StartTimeout   Duration `toml:"start_timeout"`   // default for every model
 	RequestTimeout Duration `toml:"request_timeout"` // one request to a model
@@ -181,7 +181,7 @@ func Default() *Config {
 		Scheduler: Scheduler{
 			Capacity:       1.0,
 			Idle:           Duration{10 * time.Minute},
-			Rotation:       Duration{2 * time.Hour},
+			MaxTimeslice:   Duration{2 * time.Hour},
 			MaxAttempts:    3,
 			StartTimeout:   Duration{15 * time.Minute},
 			RequestTimeout: Duration{10 * time.Minute},

@@ -29,6 +29,7 @@ type Scheduler struct {
 	running map[int64]run   // request id -> what it is
 	keys    map[string]bool // cache keys being answered
 	cursor  map[string]string
+	slice   time.Time // when the slice's first model loaded; zero: none yet (see Decide)
 	waiters map[int64]chan struct{}
 	wake    chan struct{}
 	ready   chan struct{} // closed once Run has set up
@@ -43,7 +44,7 @@ type slot struct {
 	state      State
 	upSince    time.Time
 	busyAt     time.Time
-	lastOn     time.Time // the last round it was starting, up or draining
+	ledAt      time.Time // when it last led a slice (see Decide)
 	inflight   int
 	startFails int
 	brokenAt   time.Time // zero: not broken
@@ -202,11 +203,8 @@ func (s *Scheduler) round(ctx context.Context) error {
 		if ready > 0 || sl.inflight > 0 || sl.state == Starting {
 			sl.busyAt = now
 		}
-		if sl.state != Down {
-			sl.lastOn = now
-		}
 		models = append(models, Model{Name: name, Cost: sl.model.Cost, State: sl.state,
-			UpSince: sl.upSince, Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt, LastOn: sl.lastOn})
+			Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt, LedAt: sl.ledAt})
 	}
 	for _, name := range refuse {
 		ids, err := s.Q.FailQueued(name, "model_unavailable",
@@ -218,12 +216,18 @@ func (s *Scheduler) round(ctx context.Context) error {
 		s.notifyLocked(ids...)
 	}
 
-	pol := Policy{Rotation: s.Cfg.Scheduler.Rotation.Duration, Idle: s.Cfg.Scheduler.Idle.Duration,
-		Budget: s.Cfg.Scheduler.Capacity}
-	for _, a := range Decide(models, now, pol) {
+	if !s.onCard() {
+		s.slice = time.Time{} // an empty card ends the slice
+	}
+	pol := Policy{MaxTimeslice: s.Cfg.Scheduler.MaxTimeslice.Duration, Idle: s.Cfg.Scheduler.Idle.Duration,
+		Capacity: s.Cfg.Scheduler.Capacity}
+	for _, a := range Decide(models, s.slice, now, pol) {
 		sl := s.slots[a.Model]
 		switch a.Kind {
 		case Start:
+			if !s.onCard() { // the first of a new slice: its clock starts when it has loaded
+				s.slice = time.Time{}
+			}
 			s.start(ctx, a.Model, sl)
 		case Stop:
 			if sl.state == Up && pol.Idle > 0 && now.Sub(sl.busyAt) >= pol.Idle {
@@ -235,7 +239,7 @@ func (s *Scheduler) round(ctx context.Context) error {
 			sl.state, sl.server = Down, nil
 			go srv.Stop()
 		case Drain:
-			s.logf("%s: up %s with others waiting: draining (rotation)", a.Model, now.Sub(sl.upSince).Round(time.Second))
+			s.logf("%s: its slice has had %s, and a model waits that doesn't fit: draining", a.Model, now.Sub(s.slice).Round(time.Second))
 			sl.state = Draining
 		}
 	}
@@ -283,6 +287,10 @@ func (s *Scheduler) start(ctx context.Context, name string, sl *slot) {
 			return
 		}
 		sl.state, sl.upSince, sl.busyAt = Up, time.Now(), time.Now()
+		if s.slice.IsZero() {
+			// the lead has loaded: the slice's clock starts, and its turn is spent
+			s.slice, sl.ledAt = sl.upSince, sl.upSince
+		}
 		s.logf("%s: up after %s (as %q)", name, time.Since(t).Round(time.Millisecond), srv.UpstreamModel())
 		s.Wake()
 	}()
@@ -533,4 +541,14 @@ func (s *Scheduler) Status() ([]Status, error) {
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// onCard: some model is starting, up or draining.
+func (s *Scheduler) onCard() bool {
+	for _, sl := range s.slots {
+		if sl.state != Down {
+			return true
+		}
+	}
+	return false
 }

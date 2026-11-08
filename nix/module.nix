@@ -274,7 +274,7 @@ in
       default = { };
       example = lib.literalExpression ''
         {
-          scheduler = { capacity = 1.0; idle = "10m"; rotation = "2h"; max_attempts = 3; };
+          scheduler = { capacity = 1.0; idle = "10m"; max_timeslice = "2h"; max_attempts = 3; };
           limits = { max_file = "1GiB"; max_window = "7d"; file_retention = "30d"; };
           cache = { enabled = true; max_age = "0"; max_unused = "0"; max_size = "0"; };
         }

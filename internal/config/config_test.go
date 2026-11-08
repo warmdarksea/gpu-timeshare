@@ -20,7 +20,7 @@ func TestLoad(t *testing.T) {
 listen = "0.0.0.0:9000"
 [scheduler]
 idle = "0"
-rotation = "1.5h"
+max_timeslice = "1.5h"
 [limits]
 max_file = "2GiB"
 file_retention = "30d"
@@ -41,7 +41,7 @@ fingerprint = "pixai-v1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Scheduler.Idle.Duration != 0 || c.Scheduler.Rotation.Duration != 90*time.Minute ||
+	if c.Scheduler.Idle.Duration != 0 || c.Scheduler.MaxTimeslice.Duration != 90*time.Minute ||
 		c.Limits.MaxFile != 2<<30 || c.Limits.FileRetention.Duration != 30*24*time.Hour ||
 		c.Cache.MaxSize != 500e6 || c.Cache.MaxUnused.Duration != 90*24*time.Hour {
 		t.Errorf("parsed: %+v %+v %+v", c.Scheduler, c.Limits, c.Cache)

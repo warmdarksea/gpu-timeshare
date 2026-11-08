@@ -6,8 +6,9 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 
 ## Layout
 
-- `internal/sched`: `policy.go` (`Decide`, a pure function of the
-  models' states: start whoever has waited longest, stop idle, rotate) and
+- `internal/sched`: `policy.go` (`Decide`: the whole scheduling algorithm,
+  one page, a pure function of the models' states; `card.go` its types and
+  primitives; `spec/Timeslice.tla` is its TLA+ model) and
   `driver.go` (applies it, dispatches round-robin between clients, never
   two requests with the same cache key at once).
 - `internal/queue`: the requests not yet delivered, the answer cache
@@ -21,6 +22,12 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 - `internal/api`: HTTP, OpenAI-shaped errors.
 
 ## Invariants
+
+- `policy.go` and `spec/Timeslice.tla` are the same algorithm, rule for
+  rule (`[Name]` in `Decide` is the action in the spec). Change them
+  together, and run `nix-build -A tests.tla` (TLC) as well as
+  `TestNoStarvation`. TLC and that simulation found several starvation
+  bugs in the first drafts; the comments in the spec and the tests say which.
 
 - The contract with a model is the OpenAI HTTP API, nothing else.
   Don't add per-server special cases.
@@ -39,6 +46,8 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 
 `go test ./...` (also inside `nix-build`): end to end against
 `gpu-timeshare-stub`, unit mode against a shell-script systemctl.
+`nix-build -A tests.tla`: TLC on the scheduler's model (a few minutes;
+`spec/four.cfg` by hand takes longer).
 `nix-build -A tests.nixos`: the module in a VM, the official OpenAI
 Python SDK over TLS, the sandbox probed from inside (the stub's
 `--probe-read`/`--probe-dial`) against a process-mode control.
