@@ -120,3 +120,43 @@ func TestIdleModelStops(t *testing.T) {
 		t.Error("Decide changed its argument")
 	}
 }
+
+// Three big models with work for days: each gets the card for a rotation
+// period, in turn. Smallest-first alone would bounce between the two
+// smallest and never start the third.
+func TestRotationTakesTurns(t *testing.T) {
+	pol := Policy{Rotation: time.Hour, Budget: 1.0}
+	ms := map[string]*Model{
+		"gemma":      {Name: "gemma", Cost: 0.95, Ready: 100},
+		"llamaguard": {Name: "llamaguard", Cost: 0.9, Ready: 100},
+		"qwen":       {Name: "qwen", Cost: 0.95, Ready: 100},
+	}
+	now := t0
+	var order []string
+	for len(order) < 7 {
+		var list []Model
+		for _, name := range []string{"gemma", "llamaguard", "qwen"} {
+			if ms[name].State != Down {
+				ms[name].LastOn = now
+			}
+			list = append(list, *ms[name])
+		}
+		for _, a := range Decide(list, now, pol) {
+			m := ms[a.Model]
+			switch a.Kind {
+			case Start: // up at once, for the test
+				m.State, m.UpSince = Up, now
+				order = append(order, a.Model)
+			case Drain:
+				m.State = Draining
+			case Stop:
+				m.State = Down
+			}
+		}
+		now = now.Add(10 * time.Minute)
+	}
+	want := []string{"llamaguard", "gemma", "qwen", "llamaguard", "gemma", "qwen", "llamaguard"}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("turns: %v, want %v", order, want)
+	}
+}

@@ -14,10 +14,14 @@ batch.
 - **The OpenAI API.** `/v1/chat/completions` (and any other endpoint you
   list), `/v1/models`, `/v1/files` and `/v1/batches`. Point an OpenAI SDK
   at it with a token as the API key.
-- **Taking turns.** Models already loaded are fed first. When a waiting
-  model doesn't fit, the smallest one that does starts, and idle models
-  stop to make room. A model that has held the card for `rotation` gives
-  way when others are waiting. Several clients get turns round-robin.
+- **Taking turns.** Models already loaded are fed first. Waiting models
+  take turns, the one off the card longest first; whatever fits beside
+  what is loaded starts, and idle models stop to make room. A model that
+  has held the card for `rotation` gives way when others are waiting and
+  goes to the back, so three big models with days of work get a `rotation`
+  each, in order. Within a model, clients take turns round-robin, and
+  each client's requests go oldest first (single requests ahead of batch
+  lines: someone is holding a connection open for those).
 - **Idle unload.** A model with no work for `idle` stops, so an empty
   queue leaves nothing on the card and it can drop to its idle power state.
 - **A cache.** Every answer is kept verbatim, keyed by the question: the

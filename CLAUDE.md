@@ -7,7 +7,7 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 ## Layout
 
 - `internal/sched`: `policy.go` (`Decide`, a pure function of the
-  models' states: start smallest-first, stop idle, rotate) and
+  models' states: start whoever has waited longest, stop idle, rotate) and
   `driver.go` (applies it, dispatches round-robin between clients, never
   two requests with the same cache key at once).
 - `internal/queue`: the requests not yet delivered, the answer cache

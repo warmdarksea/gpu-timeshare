@@ -43,6 +43,7 @@ type slot struct {
 	state      State
 	upSince    time.Time
 	busyAt     time.Time
+	lastOn     time.Time // the last round it was starting, up or draining
 	inflight   int
 	startFails int
 	brokenAt   time.Time // zero: not broken
@@ -201,8 +202,11 @@ func (s *Scheduler) round(ctx context.Context) error {
 		if ready > 0 || sl.inflight > 0 || sl.state == Starting {
 			sl.busyAt = now
 		}
+		if sl.state != Down {
+			sl.lastOn = now
+		}
 		models = append(models, Model{Name: name, Cost: sl.model.Cost, State: sl.state,
-			UpSince: sl.upSince, Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt})
+			UpSince: sl.upSince, Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt, LastOn: sl.lastOn})
 	}
 	for _, name := range refuse {
 		ids, err := s.Q.FailQueued(name, "model_unavailable",
