@@ -413,23 +413,22 @@ func (e *env) content(client string, id any) []map[string]any {
 	return out
 }
 
-// The point of the thing: a batch that mixes models, and a second client's
-// batch, are answered one model at a time -- every request for the loaded
-// model before the card switches -- not in the order they arrived.
+// The point of the thing: batches for two models from two clients, all
+// queued at once, are answered one model at a time -- every request for the
+// loaded model before the card switches -- not in the order they arrived.
 func TestBatchTimeshares(t *testing.T) {
 	e := start(t, `idle = "10m"`, twoModels)
 
-	var alice []string
-	for i := range 6 {
-		m := []string{"a", "b"}[i%2]
-		alice = append(alice, line(fmt.Sprintf("al-%d", i), m, fmt.Sprintf("picture %d", i)))
+	var aliceA, aliceB, bob []string
+	for i := range 3 {
+		aliceA = append(aliceA, line(fmt.Sprintf("al-a-%d", i), "a", fmt.Sprintf("picture %d", i)))
+		aliceB = append(aliceB, line(fmt.Sprintf("al-b-%d", i), "b", fmt.Sprintf("picture %d", i)))
 	}
-	alice = append(alice, line("al-unknown", "nope", "x"), line("al-fail", "b", "please-fail"))
-	var bob []string
+	aliceB = append(aliceB, line("al-fail", "b", "please-fail"))
 	for i := range 4 {
 		bob = append(bob, line(fmt.Sprintf("bob-%d", i), "a", fmt.Sprintf("bob picture %d", i)))
 	}
-	fa, fb := upload(e, "alice", alice), upload(e, "bob", bob)
+	fa, fbB, fb := upload(e, "alice", aliceA), upload(e, "alice", aliceB), upload(e, "bob", bob)
 
 	// privacy: bob can't see or use alice's file
 	if r := e.do("GET", "/v1/files/"+fa, "bob", nil, nil); r.status != 404 {
@@ -441,53 +440,50 @@ func TestBatchTimeshares(t *testing.T) {
 		t.Errorf("bob batching alice's file: %d %s", r.status, r.body)
 	}
 
-	ba, bb := e.batch("alice", fa, nil), e.batch("bob", fb, nil)
-	if ba["object"] != "batch" || ba["status"] != "in_progress" || ba["metadata"].(map[string]any)["run"] != "test" {
-		t.Errorf("created: %v", ba)
+	// b's batch first: arrival order is not answer order
+	bab, baa, bb := e.batch("alice", fbB, nil), e.batch("alice", fa, nil), e.batch("bob", fb, nil)
+	if baa["object"] != "batch" || baa["status"] != "in_progress" || baa["metadata"].(map[string]any)["run"] != "test" {
+		t.Errorf("created: %v", baa)
 	}
-	if r := e.do("GET", "/v1/batches/"+ba["id"].(string), "bob", nil, nil); r.status != 404 {
+	if r := e.do("GET", "/v1/batches/"+baa["id"].(string), "bob", nil, nil); r.status != 404 {
 		t.Errorf("bob reading alice's batch: %d", r.status)
 	}
-	ba = e.await("alice", ba["id"].(string), "completed")
+	baa = e.await("alice", baa["id"].(string), "completed")
+	bab = e.await("alice", bab["id"].(string), "completed")
 	bb = e.await("bob", bb["id"].(string), "completed")
 
-	counts := ba["request_counts"].(map[string]any)
-	if counts["total"] != 8.0 || counts["completed"] != 6.0 || counts["failed"] != 2.0 {
-		t.Errorf("alice's counts: %v", counts)
+	if c := bab["request_counts"].(map[string]any); c["total"] != 4.0 || c["completed"] != 3.0 || c["failed"] != 1.0 {
+		t.Errorf("alice's b counts: %v", c)
 	}
-	out := e.content("alice", ba["output_file_id"])
-	if len(out) != 6 {
-		t.Fatalf("alice's output: %d lines", len(out))
+	out := e.content("alice", baa["output_file_id"])
+	if len(out) != 3 {
+		t.Fatalf("alice's a output: %d lines", len(out))
 	}
 	for i, l := range out {
-		if l["custom_id"] != fmt.Sprintf("al-%d", i) {
+		if l["custom_id"] != fmt.Sprintf("al-a-%d", i) {
 			t.Errorf("output line %d is %v: not in input order", i, l["custom_id"])
 		}
 		res := l["response"].(map[string]any)
 		body := res["body"].(map[string]any)
-		if res["status_code"] != 200.0 || body["model"] != []string{"a", "b"}[i%2] {
+		if res["status_code"] != 200.0 || body["model"] != "a" {
 			t.Errorf("output line %d: %v", i, l)
 		}
 	}
-	errs := e.content("alice", ba["error_file_id"])
-	codes := map[string]string{}
-	for _, l := range errs {
-		codes[l["custom_id"].(string)] = l["error"].(map[string]any)["code"].(string)
-	}
-	if codes["al-unknown"] != "model_not_found" || codes["al-fail"] != "model_error" || len(codes) != 2 {
-		t.Errorf("alice's errors: %v", codes)
+	errs := e.content("alice", bab["error_file_id"])
+	if len(errs) != 1 || errs[0]["custom_id"] != "al-fail" || errs[0]["error"].(map[string]any)["code"] != "model_error" {
+		t.Errorf("alice's b errors: %v", errs)
 	}
 	if n := len(e.content("bob", bb["output_file_id"])); n != 4 {
 		t.Errorf("bob's output: %d lines", n)
 	}
-	if r := e.do("GET", "/v1/files/"+ba["output_file_id"].(string)+"/content", "bob", nil, nil); r.status != 404 {
+	if r := e.do("GET", "/v1/files/"+baa["output_file_id"].(string)+"/content", "bob", nil, nil); r.status != 404 {
 		t.Errorf("bob reading alice's results: %d", r.status)
 	}
-	if r := e.do("GET", "/v1/files/"+ba["output_file_id"].(string), "root", nil, nil); r.status != 200 {
+	if r := e.do("GET", "/v1/files/"+baa["output_file_id"].(string), "root", nil, nil); r.status != 200 {
 		t.Errorf("admin reading alice's results: %d", r.status)
 	}
 
-	// one switch: every a, then every b (or the other way round)
+	// one switch: every a (alice's and bob's), then every b
 	var names []string
 	for _, ev := range e.requests() {
 		if len(names) == 0 || names[len(names)-1] != ev.Name {
@@ -515,22 +511,23 @@ func TestBatchTimeshares(t *testing.T) {
 
 	// list, newest first
 	l := e.do("GET", "/v1/batches?limit=10", "root", nil, nil).json(t)
-	if data := l["data"].([]any); len(data) != 2 || l["has_more"] != false {
+	if data := l["data"].([]any); len(data) != 3 || l["has_more"] != false {
 		t.Errorf("admin's list: %v", l)
 	}
 	if data := e.do("GET", "/v1/batches", "bob", nil, nil).json(t)["data"].([]any); len(data) != 1 {
 		t.Errorf("bob's list has %d batches, want his 1", len(data))
 	}
 
-	// the same file again: all from the cache, nothing upstream
+	// the same files again: all from the cache, nothing upstream
 	before := len(e.requests())
 	again := e.await("alice", e.batch("alice", fa, nil)["id"].(string), "completed")
+	e.await("alice", e.batch("alice", fbB, nil)["id"].(string), "completed")
 	if n := len(e.requests()) - before; n != 3 { // the 3 attempts of please-fail; failures aren't cached
-		t.Errorf("a repeated batch went upstream %d times, want 3", n)
+		t.Errorf("repeated batches went upstream %d times, want 3", n)
 	}
-	if got := e.content("alice", again["output_file_id"]); len(got) != 6 {
+	if got := e.content("alice", again["output_file_id"]); len(got) != 3 {
 		t.Errorf("repeated batch: %d answers", len(got))
-	} else if g, w := got[3]["response"].(map[string]any)["body"], out[3]["response"].(map[string]any)["body"]; fmt.Sprint(g) != fmt.Sprint(w) {
+	} else if g, w := got[1]["response"].(map[string]any)["body"], out[1]["response"].(map[string]any)["body"]; fmt.Sprint(g) != fmt.Sprint(w) {
 		t.Errorf("a cached answer differs:\n%v\n%v", g, w)
 	}
 	// and with no-cache, everything goes upstream again
@@ -545,7 +542,7 @@ func TestBatchTimeshares(t *testing.T) {
 	if n != 0 {
 		t.Errorf("%d request rows left after every batch finished", n)
 	}
-	// an input file in use can't be deleted; one whose batches ended can
+	// an input file whose batches ended can be deleted
 	if r := e.do("DELETE", "/v1/files/"+fa, "alice", nil, nil); r.status != 200 {
 		t.Errorf("deleting a finished batch's input: %d %s", r.status, r.body)
 	}
@@ -553,7 +550,8 @@ func TestBatchTimeshares(t *testing.T) {
 
 func TestBatchValidation(t *testing.T) {
 	e := start(t, `idle = "10m"`, twoModels)
-	f := upload(e, "alice", []string{line("x", "a", "1"), line("x", "a", "2"), `{"custom_id": "y", "method": "GET", "url": "/v1/chat/completions", "body": {}}`, `nope`})
+	f := upload(e, "alice", []string{line("x", "a", "1"), line("x", "a", "2"), `{"custom_id": "y", "method": "GET", "url": "/v1/chat/completions", "body": {}}`, `nope`,
+		line("z", "b", "a second model"), line("w", "nope", "an unknown one")})
 	b := e.batch("alice", f, nil)
 	if b["status"] != "failed" {
 		t.Fatalf("a bad file made a %v batch", b["status"])
@@ -562,7 +560,7 @@ func TestBatchValidation(t *testing.T) {
 	for _, x := range b["errors"].(map[string]any)["data"].([]any) {
 		codes = append(codes, x.(map[string]any)["code"].(string))
 	}
-	if strings.Join(codes, ",") != "duplicate_custom_id,invalid_request,invalid_json_line" {
+	if strings.Join(codes, ",") != "duplicate_custom_id,invalid_request,invalid_json_line,mismatched_model,mismatched_model" {
 		t.Errorf("errors: %v", codes)
 	}
 	for _, c := range []struct{ body, param string }{
@@ -818,5 +816,29 @@ func TestCacheControl(t *testing.T) {
 	}
 	if len(errs) != 1 || errs[0]["error"].(map[string]any)["code"] != "not_cached" {
 		t.Errorf("only-if-cached batch errors: %v", errs)
+	}
+}
+
+// One model per batch, as OpenAI has it; a model this server doesn't have
+// fails the batch at validation, as OpenAI's would.
+func TestBatchOneModel(t *testing.T) {
+	e := start(t, `idle = "10m"`, twoModels)
+	b := e.batch("alice", upload(e, "alice", []string{line("x", "nope", "1"), line("y", "nope", "2")}), nil)
+	if b["status"] != "failed" {
+		t.Fatalf("an unknown model's batch is %v", b["status"])
+	}
+	if code := b["errors"].(map[string]any)["data"].([]any)[0].(map[string]any)["code"]; code != "model_not_found" {
+		t.Errorf("code %v", code)
+	}
+	b = e.batch("alice", upload(e, "alice", []string{line("x", "a", "1"), line("y", "b", "2")}), nil)
+	if b["status"] != "failed" {
+		t.Fatalf("a mixed batch is %v", b["status"])
+	}
+	er := b["errors"].(map[string]any)["data"].([]any)[0].(map[string]any)
+	if er["code"] != "mismatched_model" || er["line"] != 2.0 {
+		t.Errorf("mixed batch error: %v", er)
+	}
+	if n := len(e.requests()); n != 0 {
+		t.Errorf("a failed batch asked upstream %d times", n)
 	}
 }

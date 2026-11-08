@@ -6,9 +6,9 @@
 // file (the answers) and error file (the lines that got none) are written,
 // in input order, and its requests are deleted.
 //
-// Beyond OpenAI's rules, and only where that costs a client nothing: a
-// batch may mix models, and its completion window may be any duration up
-// to [limits].max_window. A file valid for OpenAI is valid here.
+// OpenAI's rules, so a client written for one works with the other: one
+// endpoint and one model per batch. The one liberty: the completion window
+// may be any duration up to [limits].max_window, not only 24h.
 package batch
 
 import (
@@ -298,19 +298,6 @@ func (s *Store) New(client string, admin bool, c Create, pol queue.Policy) (Batc
 	for i, l := range lines {
 		n := queue.New{BatchID: b.ID, Line: i, CustomID: l.CustomID, Client: client, Model: l.model,
 			Endpoint: c.Endpoint, FileID: f.ID, Off: l.off, Len: l.len, Key: l.key}
-		if l.unknown {
-			// a model this server doesn't have: answered at once, with an error
-			n.Key = "unknown-model"
-			id, _, err := s.Q.Insert(tx, n)
-			if err != nil {
-				return b, 0, err
-			}
-			if _, err := tx.Exec("UPDATE requests SET state = 'failed', error_code = 'model_not_found', error = ? WHERE id = ?",
-				fmt.Sprintf("no model %q here", l.model), id); err != nil {
-				return b, 0, err
-			}
-			continue
-		}
 		n.ReadCache, n.Write = pol.Read && l.caches, pol.Write && l.caches
 		n.MaxAge, n.OnlyIfCached = pol.MaxAge, pol.OnlyIfCached
 		_, hit, err := s.Q.Insert(tx, n)
@@ -335,7 +322,6 @@ type parsed struct {
 	model    string
 	key      string
 	off, len int64
-	unknown  bool
 	caches   bool
 }
 
@@ -357,6 +343,7 @@ func (s *Store) read(f File, endpoint string) ([]parsed, []LineError, error) {
 		}
 	}
 	var off int64
+	var model string
 	maxBody := int64(s.Cfg.Limits.MaxBody)
 	for n := 1; ; n++ {
 		raw, err := r.ReadBytes('\n')
@@ -415,17 +402,24 @@ func (s *Store) read(f File, endpoint string) ([]parsed, []LineError, error) {
 			bad(n, "invalid_request", "stream is not available in a batch", "body.stream")
 			continue
 		}
-		p := parsed{CustomID: l.CustomID, model: head.Model, off: start, len: length}
+		// one model per batch, as OpenAI has it: a client that batches per
+		// model works against both, and needn't know which it talks to
+		if model == "" {
+			model = head.Model
+		} else if head.Model != model {
+			bad(n, "mismatched_model", fmt.Sprintf("body.model %q: this batch is for %q (one model per batch)", head.Model, model), "body.model")
+			continue
+		}
 		m, ok := s.Cfg.Models[head.Model]
 		if !ok {
-			p.unknown = true
-		} else {
-			p.caches = m.Caches(s.Cfg)
-			p.key, err = queue.Key(endpoint, m.Identity(), l.Body)
-			if err != nil {
-				bad(n, "invalid_json_line", "body: "+err.Error(), "body")
-				continue
-			}
+			bad(n, "model_not_found", fmt.Sprintf("no model %q here", head.Model), "body.model")
+			continue
+		}
+		p := parsed{CustomID: l.CustomID, model: head.Model, off: start, len: length, caches: m.Caches(s.Cfg)}
+		p.key, err = queue.Key(endpoint, m.Identity(), l.Body)
+		if err != nil {
+			bad(n, "invalid_json_line", "body: "+err.Error(), "body")
+			continue
 		}
 		out = append(out, p)
 	}

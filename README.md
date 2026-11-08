@@ -22,8 +22,9 @@ batch.
   endpoint, the model's identity (its weights) and the request body as
   canonical JSON. The same question costs no GPU the second time,
   whoever asks it. Two identical requests in flight are asked only once.
-- **Batches.** OpenAI's Batch API, with OpenAI's file format. A batch may
-  mix models and is answered one model at a time. Its output comes back
+- **Batches.** OpenAI's Batch API, with OpenAI's rules: one model per batch,
+  so a client written for OpenAI works here unchanged. Batches for several
+  models, queued together, are answered one model at a time. Output comes back
   in input order.
 - **What a model is:** any server that speaks the OpenAI HTTP API: vLLM,
   llama.cpp's server, SGLang, TGI, Ollama, or a wrapper of your own. It is
@@ -47,7 +48,6 @@ the model loads, so give your client a generous timeout. Nothing is
 streamed: `stream: true` is refused.
 
 **Where this differs from OpenAI:**
-- batches may mix models;
 - `completion_window` is any duration up to `limits.max_window`, not only `24h`;
 - the only file purpose accepted is `batch`.
 
@@ -205,7 +205,8 @@ go test ./...                # the same go tests, no nix needed
 The Go tests run the real API and scheduler against `timeshare-stub`, a
 fake OpenAI server that starts slowly, can be made to fail, crash or fork
 a child, and logs every request. Among other things, they check:
-- a mixed batch from two clients is answered with exactly one model switch;
+- batches for two models from two clients, queued at once, are answered
+  with exactly one model switch;
 - no model ever has more requests in flight than its `concurrency`;
 - an idle unload takes the model's forked children with it;
 - expiry, cancellation and a crashing model all end their batches;
