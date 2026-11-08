@@ -8,8 +8,12 @@
 #   - a throwaway user per run (DynamicUser), the file system read-only
 #     but for its own cache, no home, no access to gpu-timeshare's state;
 #   - the GPU's device nodes and nothing else (DevicePolicy=closed);
-#   - no network beyond loopback (IPAddressDeny); it answers on a unix
-#     socket only gpu-timeshare can connect to;
+#   - a network namespace of its own (PrivateNetwork): a loopback no one
+#     else shares and nothing beyond it. It answers on a unix socket only
+#     gpu-timeshare can connect to -- its own `{socket}`, or, for a server
+#     that only does TCP, `{port}` on its private loopback with
+#     systemd-socket-proxyd (inside the same namespace) relaying that
+#     socket to it;
 #   - no capabilities, no new privileges, the @system-service syscalls;
 #   - stopped as a cgroup: every process it forked goes with it, so a
 #     stopped model never leaves VRAM behind.
@@ -48,6 +52,13 @@ let
   socketOf = name: "${socketDir}/${lib.replaceStrings [ "/" ":" ] [ "-" "-" ] name}.sock";
   units = lib.filterAttrs (_: m: m.isolation == "unit") cfg.models;
 
+  # a unit model on {port} listens here, on its own loopback, and a proxy
+  # in its namespace relays its socket to it
+  privatePort = 8000;
+  usesPort = m: lib.any (lib.hasInfix "{port}") m.command;
+  proxied = lib.filterAttrs (_: usesPort) units;
+  proxyName = name: "${unitName name}-proxy";
+
   # the GPU, as cgroup device rules: the nvidia nodes by their driver's
   # names in /proc/devices, so every card and the uvm/caps nodes match
   gpuDevices = [
@@ -63,8 +74,12 @@ let
         example = lib.literalExpression ''[ "''${vllm-env}/bin/vllm" "serve" "''${weights}" "--uds" "{socket}" ]'';
         description = ''
           The server, as argv. It must speak the OpenAI HTTP API. `{socket}`
-          is replaced by the unix socket it should listen on (with
-          isolation = "process", `{port}` works too).
+          is replaced by the unix socket it should listen on, `{port}` by
+          a TCP port on 127.0.0.1. In a unit, that loopback is its own
+          (gpu-timeshare reaches it through a proxy in its namespace), so
+          prefer `{port}` to a server's unix socket only for a server
+          that has none. With isolation = "process", `{port}` is on the
+          host's loopback, where any local user can reach it.
         '';
       };
       url = mkOption {
@@ -135,7 +150,11 @@ let
       network = mkOption {
         type = types.bool;
         default = false;
-        description = "Let its unit reach beyond loopback (a model that proxies a hosted API).";
+        description = ''
+          Give its unit the host's network instead of a namespace of its
+          own (a model that proxies a hosted API). It must then listen on
+          `{socket}`.
+        '';
       };
       serviceConfig = mkOption {
         type = types.attrsOf types.anything;
@@ -274,9 +293,12 @@ in
       assertion = (cfg.tls.certFile == null) == (cfg.tls.keyFile == null);
       message = "services.gpu-timeshare.tls: certFile and keyFile go together";
     }] ++ lib.mapAttrsToList (name: m: {
-      assertion = m.isolation == "process" || m.url != null || lib.any (lib.hasInfix "{socket}") m.command;
-      message = "services.gpu-timeshare.models.${name}: a unit model listens on {socket} or names its url";
-    }) cfg.models;
+      assertion = m.isolation == "process" || m.url != null || usesPort m || lib.any (lib.hasInfix "{socket}") m.command;
+      message = "services.gpu-timeshare.models.${name}: a unit model listens on {socket} or {port}, or names its url";
+    }) cfg.models ++ lib.mapAttrsToList (name: m: {
+      assertion = !(m.network && usesPort m);
+      message = "services.gpu-timeshare.models.${name}: with network = true it shares the host's loopback; listen on {socket}";
+    }) units;
     warnings = lib.optional (!loopback && !cfg.tls.enable)
       "services.gpu-timeshare listens on ${cfg.host} without TLS: tokens cross the network in the clear";
 
@@ -379,8 +401,10 @@ in
       serviceConfig = lib.mkMerge [
         {
           # systemd's quoting: % and $ in an argument stay literal
-          ExecStart = utils.escapeSystemdExecArgs (map (lib.replaceStrings [ "{socket}" ] [ (socketOf name) ]) m.command);
-          ExecStartPre = "-${pkgs.coreutils}/bin/rm -f ${socketOf name}";
+          ExecStart = utils.escapeSystemdExecArgs
+            (map (lib.replaceStrings [ "{socket}" "{port}" ] [ (socketOf name) (toString privatePort) ]) m.command);
+          # a stale socket from a crash; a proxied model's is the proxy's
+          ExecStartPre = lib.mkIf (!usesPort m) "-${pkgs.coreutils}/bin/rm -f ${socketOf name}";
           Restart = "no";
           TimeoutStopSec = 60;
           KillMode = "control-group";
@@ -421,11 +445,54 @@ in
           PrivateDevices = true;
         })
         (lib.mkIf (!m.network) {
+          PrivateNetwork = true;
           IPAddressDeny = "any";
           IPAddressAllow = "localhost";
         })
         m.serviceConfig
       ];
-    }) units;
+    }) units
+    // lib.mapAttrs' (name: m: lib.nameValuePair (proxyName name) {
+      description = "gpu-timeshare model ${name}: its socket, relayed to its port";
+      requires = [ "${proxyName name}.socket" ];
+      after = [ "${proxyName name}.socket" ];
+      unitConfig = {
+        # its network namespace is the model's, whichever starts first
+        JoinsNamespaceOf = [ "${unitName name}.service" ];
+        # and it goes with it, so the next start is a fresh namespace
+        PartOf = [ "${unitName name}.service" ];
+      };
+      serviceConfig = {
+        ExecStart = "${config.systemd.package}/lib/systemd/systemd-socket-proxyd 127.0.0.1:${toString privatePort}";
+        PrivateNetwork = true;
+        PrivateTmp = true;
+        DynamicUser = true;
+        PrivateDevices = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectProc = "invisible";
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = "";
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" ];
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+      };
+    }) proxied;
+
+    # a proxied model's socket: made by systemd, connectable only by the
+    # socket group (gpu-timeshare); a connection starts the proxy, which
+    # finds the model's port refused until gpu-timeshare has started it
+    systemd.sockets = lib.mapAttrs' (name: m: lib.nameValuePair (proxyName name) {
+      description = "gpu-timeshare model ${name}: its socket";
+      wantedBy = [ "sockets.target" ];
+      listenStreams = [ (socketOf name) ];
+      socketConfig = {
+        SocketUser = "root";
+        SocketGroup = socketGroup;
+        SocketMode = "0660";
+      };
+    }) proxied;
   };
 }

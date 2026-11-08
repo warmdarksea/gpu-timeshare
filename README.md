@@ -145,7 +145,8 @@ cost = 0.2
 In a command, `{socket}` becomes a unix socket under `state_dir/run`, and
 `{port}` becomes a free TCP port on 127.0.0.1. A unix socket is the better
 choice: on a TCP port, any local user can reach the model without a
-token. vLLM listens on one with `--uds`.
+token. vLLM listens on one with `--uds`. (With the NixOS module, each model
+unit has a loopback of its own, so `{port}` is safe there too.)
 
 ### Clients
 
@@ -176,7 +177,8 @@ exactly those units and nothing else. The sandbox:
 - a read-only file system, apart from the model's own cache directory;
 - no access to gpu-timeshare's state;
 - the nvidia device nodes and no other devices;
-- no network beyond loopback;
+- a network namespace of its own: a private loopback, nothing beyond it (`network = true` gives it the host's);
+- a server that only does TCP listens on `{port}` on that private loopback, and `systemd-socket-proxyd`, in the same namespace, relays its unix socket to it;
 - no capabilities;
 - the `@system-service` syscalls;
 - the model's socket is reachable only by gpu-timeshare;

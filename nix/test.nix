@@ -20,13 +20,14 @@ in
       models.a = {
         command = [ stub "--uds" "{socket}" "--name" "upstream-a" "--start" "1s"
           "--probe-read" "/var/lib/gpu-timeshare/timeshare.db,/etc/hostname"
-          "--probe-dial" "192.168.1.1:8080" ];
+          "--probe-dial" "192.168.1.1:8080,127.0.0.1:8100" ];
         cost = 0.6;
         concurrency = 2;
         gpu = false;
       };
       models.b = {
-        command = [ stub "--uds" "{socket}" "--name" "upstream-b" "--start" "1s" "--child" ];
+        # TCP only: reached through the proxy in its namespace
+        command = [ stub "--port" "{port}" "--name" "upstream-b" "--start" "1s" "--child" ];
         cost = 0.6;
         gpu = false;
       };
@@ -34,7 +35,7 @@ in
       models.p = {
         isolation = "process";
         # the control for a's probe: outside the units' sandbox, the same dial works
-        command = [ stub "--port" "{port}" "--name" "upstream-p" "--start" "0s" "--probe-dial" "192.168.1.1:8080" ];
+        command = [ stub "--port" "{port}" "--name" "upstream-p" "--start" "0s" "--probe-dial" "192.168.1.1:8080,127.0.0.1:8100" ];
         cost = 0.1;
         gpu = false;
       };
@@ -68,11 +69,14 @@ in
         assert "probe read /etc/hostname: ok" in journal, journal
         assert "probe read /var/lib/gpu-timeshare/timeshare.db: ERROR" in journal, journal
         assert "probe dial 192.168.1.1:8080: ERROR" in journal, journal
+        # its loopback is its own: the host's services aren't on it
+        assert "probe dial 127.0.0.1:8100: ERROR" in journal, journal
         control = server.succeed("cat /var/lib/gpu-timeshare/logs/p.log")
         assert "probe dial 192.168.1.1:8080: ok" in control, control
+        assert "probe dial 127.0.0.1:8100: ok" in control, control
         assert "Access denied" not in server.succeed("journalctl -u gpu-timeshare -o cat"), "the start-up stop of the units was refused"
-        props = server.succeed("systemctl show gpu-timeshare-model-a -p DynamicUser -p NoNewPrivileges -p PrivateDevices -p CapabilityBoundingSet")
-        assert "DynamicUser=yes" in props and "NoNewPrivileges=yes" in props and "PrivateDevices=yes" in props, props
+        props = server.succeed("systemctl show gpu-timeshare-model-a -p DynamicUser -p NoNewPrivileges -p PrivateDevices -p PrivateNetwork -p CapabilityBoundingSet")
+        assert all(f"{p}=yes" in props for p in ("DynamicUser", "NoNewPrivileges", "PrivateDevices", "PrivateNetwork")), props
         # only gpu-timeshare (and root) can connect to a model's socket
         server.succeed("stat -c '%G %a' /run/gpu-timeshare-models | grep -x 'gpu-timeshare-models 2770'")
 
@@ -84,6 +88,20 @@ in
         server.wait_until_fails("systemctl is-active gpu-timeshare-model-a.service", timeout=60)
         server.wait_until_fails("systemctl is-active gpu-timeshare-model-b.service", timeout=60)
         server.fail("pgrep -f 'sleep 3600'")
+        # b's proxy goes with it; its socket stays, for the next start
+        server.wait_until_fails("systemctl is-active gpu-timeshare-model-b-proxy.service", timeout=30)
+        server.succeed("systemctl is-active gpu-timeshare-model-b-proxy.socket")
+
+    with subtest("a TCP-only model: on its own loopback, reached only through its socket"):
+        server.succeed("systemctl start gpu-timeshare-model-b.service")
+        sock = "/run/gpu-timeshare-models/b.sock"
+        server.wait_until_succeeds(
+            f"runuser -u gpu-timeshare -- curl -sf --unix-socket {sock} http://b/v1/models | grep -q upstream-b", timeout=60)
+        # not on the host's loopback, and the socket is gpu-timeshare's alone
+        server.fail("curl -s --max-time 5 http://127.0.0.1:8000/v1/models")
+        server.fail(f"runuser -u nobody -- curl -s --max-time 5 --unix-socket {sock} http://b/v1/models")
+        server.succeed("systemctl stop gpu-timeshare-model-b.service")
+        server.wait_until_fails("systemctl is-active gpu-timeshare-model-b-proxy.service", timeout=30)
 
     with subtest("a restart starts no model, and keeps the certificate"):
         before = server.succeed("sha256sum /var/lib/gpu-timeshare/tls/timeshare.crt")
