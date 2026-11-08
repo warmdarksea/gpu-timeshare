@@ -1,3 +1,5 @@
+> slop alert: llm-generated prose follows. sorry. -norn
+
 # gpu-timeshare
 
 One GPU, many models, the OpenAI API in front.
