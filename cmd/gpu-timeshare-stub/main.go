@@ -1,9 +1,9 @@
-// timeshare-stub is a fake OpenAI server for tests: a model server that
+// gpu-timeshare-stub is a fake OpenAI server for tests: a model server that
 // starts slowly, answers chat completions with a digest of what it was
 // asked, and logs every request, so a test can assert what the scheduler
 // sent where and when.
 //
-//	timeshare-stub (--port N | --uds PATH) [--name NAME] [--start 0.5s] [--delay 50ms] [--log FILE]
+//	gpu-timeshare-stub (--port N | --uds PATH) [--name NAME] [--start 0.5s] [--delay 50ms] [--log FILE]
 //
 // A request whose body contains "please-fail" gets a 500, "bad-request" a
 // 400. With --exit-after N it exits after N answers (a crash at work).

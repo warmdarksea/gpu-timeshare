@@ -26,7 +26,7 @@
 #   };
 #
 # Clients, as the service user:
-#   sudo -u gpu-timeshare timeshare-admin token add alice   # prints alice's token, once
+#   sudo -u gpu-timeshare gpu-timeshare-admin token add alice   # prints alice's token, once
 # and then any OpenAI client, with base_url https://HOST:8100/v1 and that
 # token as its API key, trusting /var/lib/gpu-timeshare/tls/timeshare.crt
 # (self-signed, made on the first start, unless tls.certFile is set).
@@ -177,7 +177,7 @@ let
     models = lib.mapAttrs modelSettings cfg.models;
   } cfg.settings);
 
-  admin = pkgs.writeShellScriptBin "timeshare-admin" ''
+  admin = pkgs.writeShellScriptBin "gpu-timeshare-admin" ''
     exec ${lib.getExe cfg.package} "$@" --config ${configFile}
   '';
 

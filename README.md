@@ -87,7 +87,7 @@ a fresh sample.
 
 ## Configuration
 
-`timeshare serve --config timeshare.toml`. Every setting below is shown
+`gpu-timeshare serve --config timeshare.toml`. Every setting below is shown
 with its default, except the models:
 
 ```toml
@@ -146,11 +146,11 @@ token. vLLM listens on one with `--uds`.
 ### Clients
 
 ```
-timeshare token add alice [--admin]   # prints alice's token, once; only its sha256 is kept
-timeshare token list | remove NAME
-timeshare cache stats | clear [--model NAME]
-timeshare check                       # reads the config, says what it found
-timeshare cert --hosts box,10.0.0.2   # a self-signed certificate (its own CA) for [tls]
+gpu-timeshare token add alice [--admin]   # prints alice's token, once; only its sha256 is kept
+gpu-timeshare token list | remove NAME
+gpu-timeshare cache stats | clear [--model NAME]
+gpu-timeshare check                       # reads the config, says what it found
+gpu-timeshare cert --hosts box,10.0.0.2   # a self-signed certificate (its own CA) for [tls]
 ```
 
 A client sees its own files and batches; an admin sees everyone's.
@@ -193,18 +193,18 @@ services.gpu-timeshare = {
 };
 ```
 
-Make tokens with `sudo -u gpu-timeshare timeshare-admin token add alice`.
+Make tokens with `sudo -u gpu-timeshare gpu-timeshare-admin token add alice`.
 Clients trust `/var/lib/gpu-timeshare/tls/timeshare.crt`.
 
 ## Building and testing
 
 ```
-nix-build                    # timeshare, timeshare-stub; the go tests run in the build
+nix-build                    # gpu-timeshare, gpu-timeshare-stub; the go tests run in the build
 nix-build -A tests.nixos     # VM: the module, sandboxed units, the OpenAI SDK over TLS
 go test ./...                # the same go tests, no nix needed
 ```
 
-The Go tests run the real API and scheduler against `timeshare-stub`, a
+The Go tests run the real API and scheduler against `gpu-timeshare-stub`, a
 fake OpenAI server that starts slowly, can be made to fail, crash or fork
 a child, and logs every request. Among other things, they check:
 - batches for two models from two clients, queued at once, are answered

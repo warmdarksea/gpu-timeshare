@@ -1,6 +1,6 @@
 package main
 
-// End to end: the real API and scheduler, with timeshare-stub standing in
+// End to end: the real API and scheduler, with gpu-timeshare-stub standing in
 // for the model servers.
 
 import (
@@ -35,8 +35,8 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	stub = filepath.Join(dir, "timeshare-stub")
-	if out, err := exec.Command("go", "build", "-o", stub, "gpu-timeshare/cmd/timeshare-stub").CombinedOutput(); err != nil {
+	stub = filepath.Join(dir, "gpu-timeshare-stub")
+	if out, err := exec.Command("go", "build", "-o", stub, "gpu-timeshare/cmd/gpu-timeshare-stub").CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "building the stub: %v\n%s", err, out)
 		os.Exit(1)
 	}
@@ -57,7 +57,7 @@ type env struct {
 	logMu  *sync.Mutex
 }
 
-// start runs a timeshare over the given models (TOML, with STUB and LOG
+// start runs a gpu-timeshare over the given models (TOML, with STUB and LOG
 // standing for the stub binary and its event log) until the test ends.
 func start(t *testing.T, scheduler, models string) *env { return startTop(t, "", scheduler, models) }
 

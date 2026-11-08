@@ -38,7 +38,7 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 ## Tests
 
 `go test ./...` (also inside `nix-build`): end to end against
-`timeshare-stub`, unit mode against a shell-script systemctl.
+`gpu-timeshare-stub`, unit mode against a shell-script systemctl.
 `nix-build -A tests.nixos`: the module in a VM, the official OpenAI
 Python SDK over TLS, the sandbox probed from inside (the stub's
 `--probe-read`/`--probe-dial`) against a process-mode control.

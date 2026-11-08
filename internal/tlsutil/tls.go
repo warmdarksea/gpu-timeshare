@@ -1,6 +1,6 @@
 // Package tlsutil is TLS for the API: serve takes a certificate and key,
 // re-read whenever the files change (a renewal needs no restart), and
-// `timeshare cert` makes a self-signed pair for a network with no CA --
+// `gpu-timeshare cert` makes a self-signed pair for a network with no CA --
 // clients then trust that certificate itself (it is its own CA).
 package tlsutil
 
@@ -131,7 +131,7 @@ func SelfSigned(hosts []string, days int) (certPEM, keyPEM []byte, err error) {
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}), nil
 }
 
-// timeshare cert: a self-signed certificate and key for serve --tls-cert/--tls-key.
+// gpu-timeshare cert: a self-signed certificate and key for serve --tls-cert/--tls-key.
 func CertCmd(args []string) error {
 	fs := flag.NewFlagSet("cert", flag.ExitOnError)
 	hosts := fs.String("hosts", "", "comma-separated names and addresses the server is reached by (required)")
@@ -152,7 +152,7 @@ func CertCmd(args []string) error {
 		}
 	}
 	if len(hs) == 0 {
-		return errors.New("usage: timeshare cert --hosts name[,name,ip...] [--cert timeshare.crt] [--key timeshare.key]")
+		return errors.New("usage: gpu-timeshare cert --hosts name[,name,ip...] [--cert timeshare.crt] [--key timeshare.key]")
 	}
 	certPEM, keyPEM, err := SelfSigned(hs, *days)
 	if err != nil {
@@ -167,7 +167,7 @@ func CertCmd(args []string) error {
 		return err
 	}
 	block, _ := pem.Decode(certPEM)
-	fmt.Fprintf(os.Stderr, "timeshare: wrote %s and %s for %s (%s)\n", *certOut, *keyOut,
+	fmt.Fprintf(os.Stderr, "gpu-timeshare: wrote %s and %s for %s (%s)\n", *certOut, *keyOut,
 		strings.Join(hs, ", "), Fingerprint(block.Bytes))
 	return nil
 }

@@ -1,6 +1,6 @@
 # gpu-timeshare, for nix (not a flake):
 #
-#   nix-build                       timeshare (and timeshare-stub, the fake model server the tests use)
+#   nix-build                       gpu-timeshare (and gpu-timeshare-stub, the fake model server the tests use)
 #   nix-build -A tests.nixos        a VM: the module, sandboxed model units, an OpenAI SDK client over TLS
 #   nix-shell                       go, gopls
 #
@@ -32,7 +32,7 @@ let
     };
     vendorHash = "sha256-oiFR2zSOSg5J4G78BuisXU4S/1/dqOZ4ZZRm0RSjJmA=";
     env.CGO_ENABLED = "0";
-    subPackages = [ "cmd/timeshare" "cmd/timeshare-stub" ];
+    subPackages = [ "cmd/gpu-timeshare" "cmd/gpu-timeshare-stub" ];
     ldflags = [ "-s" "-w" ];
     # every package's tests, end to end included (the stub stands in for
     # the model servers; a shell script for systemctl)
@@ -47,7 +47,7 @@ let
     };
     meta = {
       description = "One GPU, many models, the OpenAI API in front: batches, a queue, a cache, and taking turns";
-      mainProgram = "timeshare";
+      mainProgram = "gpu-timeshare";
       platforms = lib.platforms.linux;
     };
   };

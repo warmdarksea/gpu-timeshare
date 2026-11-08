@@ -1,10 +1,10 @@
-# The module in a VM, with timeshare-stub as the models (no GPU here):
+# The module in a VM, with gpu-timeshare-stub as the models (no GPU here):
 # a client machine drives it with the official OpenAI Python SDK over TLS,
 # and the test checks the sandbox from the outside -- what a model can't
 # read, can't reach, and what gpu-timeshare can't make systemd do.
 { gpu-timeshare }:
 let
-  stub = "${gpu-timeshare}/bin/timeshare-stub";
+  stub = "${gpu-timeshare}/bin/gpu-timeshare-stub";
 in
 {
   name = "gpu-timeshare";
@@ -57,7 +57,7 @@ in
     client.wait_for_open_port(8080)
     server.succeed("curl -sf http://192.168.1.1:8080/ >/dev/null")  # reachable, for the server itself
 
-    token = server.succeed("runuser -u gpu-timeshare -- timeshare-admin token add alice").strip()
+    token = server.succeed("runuser -u gpu-timeshare -- gpu-timeshare-admin token add alice").strip()
     assert token.startswith("gts_"), token
     crt = server.succeed("cat /var/lib/gpu-timeshare/tls/timeshare.crt")
     client.succeed(f"cat > /tmp/ca.crt <<'EOF'\n{crt}EOF")

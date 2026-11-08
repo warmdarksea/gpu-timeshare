@@ -1,10 +1,10 @@
-// timeshare: one GPU, many models, the OpenAI API in front.
+// gpu-timeshare: one GPU, many models, the OpenAI API in front.
 //
-//	timeshare serve  [--config FILE]               run the server
-//	timeshare token  add NAME [--admin] | list | remove NAME
-//	timeshare cache  stats | clear [--model NAME]
-//	timeshare check  [--config FILE]               read the config and say what it holds
-//	timeshare cert   --hosts a,b [--cert F] [--key F]   a self-signed certificate
+//	gpu-timeshare serve  [--config FILE]               run the server
+//	gpu-timeshare token  add NAME [--admin] | list | remove NAME
+//	gpu-timeshare cache  stats | clear [--model NAME]
+//	gpu-timeshare check  [--config FILE]               read the config and say what it holds
+//	gpu-timeshare cert   --hosts a,b [--cert F] [--key F]   a self-signed certificate
 //
 // The config file is --config, or $TIMESHARE_CONFIG, or ./timeshare.toml.
 package main
@@ -37,16 +37,16 @@ import (
 )
 
 const usage = `usage:
-  timeshare serve  [--config FILE]
-  timeshare token  add NAME [--admin] | list | remove NAME   [--config FILE]
-  timeshare cache  stats | clear [--model NAME]              [--config FILE]
-  timeshare check  [--config FILE]
-  timeshare cert   --hosts NAME[,NAME,IP...] [--cert FILE] [--key FILE] [--days N] [--if-missing]
+  gpu-timeshare serve  [--config FILE]
+  gpu-timeshare token  add NAME [--admin] | list | remove NAME   [--config FILE]
+  gpu-timeshare cache  stats | clear [--model NAME]              [--config FILE]
+  gpu-timeshare check  [--config FILE]
+  gpu-timeshare cert   --hosts NAME[,NAME,IP...] [--cert FILE] [--key FILE] [--days N] [--if-missing]
 `
 
 func main() {
 	log.SetFlags(0)
-	log.SetPrefix("timeshare: ")
+	log.SetPrefix("gpu-timeshare: ")
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -187,7 +187,7 @@ func token(args []string) error {
 	admin := fs.Bool("admin", false, "the client sees every client's files and batches")
 	pos := parse(fs, args)
 	if len(pos) == 0 {
-		return errors.New("usage: timeshare token add NAME [--admin] | list | remove NAME")
+		return errors.New("usage: gpu-timeshare token add NAME [--admin] | list | remove NAME")
 	}
 	_, d, err := open(*cfgPath)
 	if err != nil {
@@ -202,7 +202,7 @@ func token(args []string) error {
 			return err
 		}
 		fmt.Println(t)
-		fmt.Fprintf(os.Stderr, "timeshare: client %s made; the token above is shown only now\n", pos[1])
+		fmt.Fprintf(os.Stderr, "gpu-timeshare: client %s made; the token above is shown only now\n", pos[1])
 	case pos[0] == "remove" && len(pos) == 2:
 		return a.Remove(pos[1])
 	case pos[0] == "list" && len(pos) == 1:
@@ -217,7 +217,7 @@ func token(args []string) error {
 		}
 		w.Flush()
 	default:
-		return errors.New("usage: timeshare token add NAME [--admin] | list | remove NAME")
+		return errors.New("usage: gpu-timeshare token add NAME [--admin] | list | remove NAME")
 	}
 	return nil
 }
@@ -254,9 +254,9 @@ func cache(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "timeshare: %d answer(s) dropped\n", n)
+		fmt.Fprintf(os.Stderr, "gpu-timeshare: %d answer(s) dropped\n", n)
 	default:
-		return errors.New("usage: timeshare cache stats | clear [--model NAME]")
+		return errors.New("usage: gpu-timeshare cache stats | clear [--model NAME]")
 	}
 	return nil
 }
