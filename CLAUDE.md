@@ -20,6 +20,12 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 - `internal/upstream`: a model server as a child process (process
   group, killed whole) or a systemd unit (systemctl).
 - `internal/api`: HTTP, OpenAI-shaped errors.
+- `doc/DESIGN.md` (the scheduler, its code and its TLA+ model) and
+  `doc/SECURITY.md` (the sandbox, its gaps, how to examine it). Change
+  them with the code they describe.
+- `bin/sandbox-report`: what a running process can reach, from /proc and
+  /sys only (`--probe` tests it as the process); packaged as
+  `sandbox-report`, and the VM test runs it against a model unit.
 
 ## Invariants
 

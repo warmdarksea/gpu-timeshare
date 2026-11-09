@@ -11,6 +11,7 @@ in
 
   nodes.server = { ... }: {
     imports = [ gpu-timeshare.module ];
+    environment.systemPackages = [ gpu-timeshare.sandbox-report ];
     services.gpu-timeshare = {
       enable = true;
       package = gpu-timeshare;
@@ -108,6 +109,17 @@ in
         opts = server.succeed(f"nsenter -t {pid} -m -- findmnt -n -o OPTIONS --target {cache}")
         assert "noexec" not in opts, opts
         server.succeed(f"stat -c %U {cache} | grep -x gtm-b")
+        # the same, from the kernel's side: doc/SECURITY.md's sandbox-report
+        report = server.succeed(f"sandbox-report {pid} --probe --path /var/lib/gpu-timeshare --path /etc/hostname")
+        print(report)
+        for want in ("user        gtm-b", "capabilities  effective: none", "no_new_privs  yes",
+                     "net     own", "mnt     own", "/ is read-only", "interfaces: lo",
+                     "/var/lib/gpu-timeshare: ---", "/etc/hostname: r--"):
+            assert want in report, want
+        opens = next(l for l in report.splitlines() if l.startswith("devices it can open:"))
+        assert "/dev/null" in opens and "nvidia" not in opens, opens
+        writes = next(l for l in report.splitlines() if l.startswith("mounts it can write to:"))
+        assert cache in writes and "/var/lib" not in writes.replace(cache, ""), writes
         server.succeed("systemctl stop gpu-timeshare-model-b.service")
         server.wait_until_fails("systemctl is-active gpu-timeshare-model-b-proxy.service", timeout=30)
 

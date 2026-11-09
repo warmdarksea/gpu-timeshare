@@ -1,0 +1,351 @@
+#!/usr/bin/env nix-shell
+#!nix-shell -i python3 -p python3
+"""sandbox-report: what a running process can reach, as the kernel sees it.
+
+    sudo sandbox-report PID [--probe] [--path PATH ...]
+
+Every fact comes from the kernel (/proc, /sys), never from the process:
+its identity, privileges, namespaces, mounts, network, devices, cgroup
+limits and open files. A namespace it shares with PID 1 is reported as
+"the host's": for the mount namespace, that means every file its uid and
+groups can reach.
+
+--probe also tests access, instead of reading configuration: a helper
+process joins the target's cgroup and its mount, network, IPC, UTS and
+cgroup namespaces, takes its uid, gid and groups, and then opens every
+device node it can see and checks which mounts (and --path paths) it can
+write. The helper keeps no capabilities. It does not copy the target's
+seccomp filter or capabilities, so for a process that has capabilities
+it reports less than the process can do. It never opens a watchdog.
+
+Needs root (the namespaces and /proc of another user's process).
+"""
+
+import argparse
+import errno
+import json
+import os
+import stat
+import sys
+
+CAPS = """chown dac_override dac_read_search fowner fsetid kill setgid setuid
+setpcap linux_immutable net_bind_service net_broadcast net_admin net_raw
+ipc_lock ipc_owner sys_module sys_rawio sys_chroot sys_ptrace sys_pacct
+sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod
+lease audit_write audit_control setfcap mac_override mac_admin syslog
+wake_alarm block_suspend audit_read perfmon bpf checkpoint_restore""".split()
+
+NAMESPACES = ["mnt", "net", "pid", "ipc", "uts", "user", "cgroup", "time"]
+PSEUDO_FS = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "bpf", "debugfs",
+             "tracefs", "securityfs", "pstore", "configfs", "fusectl", "hugetlbfs",
+             "efivarfs", "binfmt_misc", "autofs", "nsfs", "devtmpfs", "ramfs", "rpc_pipefs"}
+NEVER_OPEN = ("watchdog",)  # opening one arms the hardware watchdog
+
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def link(path):
+    try:
+        return os.readlink(path)
+    except OSError:
+        return None
+
+
+def names(path):
+    """name -> id and id -> name from /etc/passwd or /etc/group (the host's)."""
+    out = {}
+    for line in (read(path) or "").splitlines():
+        f = line.split(":")
+        if len(f) > 2 and f[2].isdigit():
+            out[int(f[2])] = f[0]
+    return out
+
+
+USERS, GROUPS = names("/etc/passwd"), names("/etc/group")
+
+
+def who(i, table):
+    return f"{table.get(i, '?')} ({i})"
+
+
+def status(pid):
+    out = {}
+    for line in (read(f"/proc/{pid}/status") or "").splitlines():
+        k, _, v = line.partition(":")
+        out[k] = v.strip()
+    return out
+
+
+def caps(hexmask):
+    m = int(hexmask, 16)
+    on = [CAPS[i] if i < len(CAPS) else f"cap{i}" for i in range(64) if m >> i & 1]
+    if len(on) >= len(CAPS):
+        return "all"
+    return ", ".join(on) or "none"
+
+
+def mounts(pid):
+    """/proc/PID/mountinfo, parsed: one dict per mount."""
+    out = []
+    for line in (read(f"/proc/{pid}/mountinfo") or "").splitlines():
+        a, _, b = line.partition(" - ")
+        f, g = a.split(), b.split()
+        out.append({"root": f[3], "point": f[4], "opts": f[5].split(","),
+                    "fstype": g[0], "source": g[1] if len(g) > 1 else "",
+                    "super": g[2].split(",") if len(g) > 2 else []})
+    return out
+
+
+def hexaddr(h):
+    """a /proc/net/tcp address (little-endian hex) -> text."""
+    ip, port = h.split(":")
+    port = int(port, 16)
+    if len(ip) == 8:
+        b = bytes.fromhex(ip)[::-1]
+        return f"{'.'.join(map(str, b))}:{port}"
+    words = [bytes.fromhex(ip[i:i + 8])[::-1].hex() for i in range(0, 32, 8)]
+    full = "".join(words)
+    groups = [full[i:i + 4].lstrip("0") or "0" for i in range(0, 32, 4)]
+    return f"[{':'.join(groups)}]:{port}"
+
+
+def sharers(pid, ns):
+    """other processes in the same namespace (by the kernel's inode)."""
+    mine = link(f"/proc/{pid}/ns/{ns}")
+    out = []
+    for p in os.listdir("/proc"):
+        if p.isdigit() and int(p) != pid and link(f"/proc/{p}/ns/{ns}") == mine:
+            out.append(int(p))
+    return out
+
+
+def exe(pid):
+    return link(f"/proc/{pid}/exe") or (read(f"/proc/{pid}/comm") or "?").strip()
+
+
+def section(title):
+    print(f"\n== {title}")
+
+
+def device_nodes(root):
+    """char and block nodes under ROOT/dev: (path inside, kind, major, minor)."""
+    out = []
+    base = os.path.join(root, "dev")
+    for d, dirs, files in os.walk(base):
+        for n in files + dirs:
+            p = os.path.join(d, n)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            kind = "char" if stat.S_ISCHR(st.st_mode) else "block" if stat.S_ISBLK(st.st_mode) else None
+            if kind:
+                out.append(("/" + os.path.relpath(p, root), kind, os.major(st.st_rdev), os.minor(st.st_rdev)))
+    return sorted(out)
+
+
+def probe(pid, st, cgroup, writable, paths):
+    """run in a child: become the target (cgroup, namespaces, ids), test access."""
+    r, w = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(r)
+        res = {}
+        try:
+            with open(f"/sys/fs/cgroup{cgroup}/cgroup.procs", "w") as f:
+                f.write(str(os.getpid()))
+            fds = {ns: os.open(f"/proc/{pid}/ns/{ns}", os.O_RDONLY) for ns in ("ipc", "uts", "net", "cgroup", "mnt")}
+            for ns in ("ipc", "uts", "net", "cgroup", "mnt"):  # mnt last: it changes what /proc/PID is
+                os.setns(fds[ns], 0)
+            os.chdir("/")
+            uid = int(st["Uid"].split()[1])
+            gid = int(st["Gid"].split()[1])
+            os.setgroups([int(g) for g in st.get("Groups", "").split()])
+            os.setgid(gid)
+            os.setuid(uid)  # from root: drops every capability
+            res["devices"] = []
+            for path, kind, ma, mi in device_nodes("/"):
+                if any(x in path for x in NEVER_OPEN):
+                    res["devices"].append([path, kind, ma, mi, "not tested (watchdog)"])
+                    continue
+                got = None
+                modes = [("rw", os.O_RDWR), ("r", os.O_RDONLY)] if kind == "char" else [("r", os.O_RDONLY)]
+                for name, mode in modes:
+                    try:
+                        fd = os.open(path, mode | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+                        os.close(fd)
+                        got = name
+                        break
+                    except OSError as e:
+                        got = {errno.EPERM: "denied by the device policy",
+                               errno.EACCES: "denied by file permissions"}.get(
+                                   e.errno, f"policy allows it; open: {os.strerror(e.errno)}")
+                res["devices"].append([path, kind, ma, mi, got])
+            res["writable"] = [m for m in writable if os.access(m, os.W_OK)]
+            res["paths"] = {p: "".join(c if os.access(p, m) else "-" for c, m in (("r", os.R_OK), ("w", os.W_OK), ("x", os.X_OK)))
+                            if os.path.lexists(p) else "does not exist (in its mount namespace)" for p in paths}
+        except Exception as e:  # report, don't hide
+            res["error"] = f"{type(e).__name__}: {e}"
+        os.write(w, json.dumps(res).encode())
+        os._exit(0)
+    os.close(w)
+    data = b""
+    while chunk := os.read(r, 65536):
+        data += chunk
+    os.waitpid(child, 0)
+    return json.loads(data or b"{}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("pid", type=int)
+    ap.add_argument("--probe", action="store_true", help="test access as the process (root)")
+    ap.add_argument("--path", action="append", default=[], help="with --probe: also test this path (rwx)")
+    a = ap.parse_args()
+    pid = a.pid
+    st = status(pid)
+    if not st:
+        sys.exit(f"sandbox-report: no process {pid}")
+
+    section(f"process {pid}")
+    print(f"executable  {exe(pid)}")
+    ids = st["Uid"].split()
+    gids = st["Gid"].split()
+    print(f"user        {who(int(ids[1]), USERS)}" + ("" if len(set(ids)) == 1 else f"  (real/effective/saved/fs: {' '.join(ids)})"))
+    print(f"group       {who(int(gids[1]), GROUPS)}")
+    print(f"groups      {', '.join(who(int(g), GROUPS) for g in st.get('Groups', '').split()) or 'none'}")
+    print(f"threads     {st.get('Threads', '?')}")
+
+    section("privileges")
+    print(f"capabilities  effective: {caps(st['CapEff'])}")
+    print(f"              permitted: {caps(st['CapPrm'])}")
+    print(f"              bounding:  {caps(st['CapBnd'])}  (the most it or its children can ever get)")
+    print(f"              ambient:   {caps(st['CapAmb'])}")
+    print(f"no_new_privs  {'yes: setuid files and file capabilities give it nothing' if st.get('NoNewPrivs') == '1' else 'no'}")
+    mode = {"0": "off", "1": "strict", "2": "filter"}.get(st.get("Seccomp"), st.get("Seccomp"))
+    print(f"seccomp       {mode}" + (f", {st.get('Seccomp_filters', '?')} filter(s) (not decoded here)" if mode == "filter" else ""))
+
+    section("namespaces (compared with PID 1)")
+    own = {}
+    for ns in NAMESPACES:
+        mine, host = link(f"/proc/{pid}/ns/{ns}"), link(f"/proc/1/ns/{ns}")
+        if mine is None:
+            continue
+        own[ns] = mine != host
+        if own[ns]:
+            others = sharers(pid, ns)
+            tail = f"; shared with {len(others)} other process(es): " + ", ".join(f"{p} {os.path.basename(exe(p))}" for p in others[:4]) if others else "; no other process"
+            print(f"{ns:7} own {mine}{tail}")
+        else:
+            print(f"{ns:7} the host's")
+
+    section("files")
+    ms = mounts(pid)
+    writable = []
+    if not own.get("mnt"):
+        print("the host's mount namespace: every file its uid and groups can reach.")
+    else:
+        root = next((m for m in ms if m["point"] == "/"), None)
+        print(f"{len(ms)} mounts. / is {'read-only' if root and 'ro' in root['opts'] else 'WRITABLE'}.")
+        hidden = [m["point"] for m in ms if "inaccessible" in m["root"] or ("ro" in m["opts"] and m["fstype"] == "tmpfs" and "mode=000" in m["super"])]
+        rw = [m for m in ms if "rw" in m["opts"] and m["fstype"] not in PSEUDO_FS]
+        writable = [m["point"] for m in rw]
+        print("writable mounts (the kernel lets it write, if file permissions do too):")
+        for m in rw:
+            flags = [o for o in ("noexec", "nosuid", "nodev") if o in m["opts"]]
+            print(f"  {m['point']}  ({m['fstype']}{', ' + ', '.join(flags) if flags else ''}{'' if 'noexec' in m['opts'] else ', can run what it writes'})")
+        if hidden:
+            print("made inaccessible: " + ", ".join(hidden))
+        seen = set()
+        proc = [m for m in ms if m["fstype"] == "proc" and not m["point"].startswith("/proc/")
+                and not (m["point"] in seen or seen.add(m["point"]))]
+        for m in proc:
+            extra = [o for o in m["super"] if o.startswith(("hidepid", "subset"))]
+            print(f"/proc at {m['point']}: {', '.join(extra) or 'every process visible'}")
+
+    section("network")
+    if not own.get("net"):
+        print("the host's network namespace: every interface and address the host has.")
+    else:
+        ifs = [l.split(":")[0].strip() for l in (read(f"/proc/{pid}/net/dev") or "").splitlines()[2:]]
+        print(f"interfaces: {', '.join(ifs) or 'none'}")
+        addrs, last = set(), None
+        for l in (read(f"/proc/{pid}/net/fib_trie") or "").splitlines():
+            t = l.strip()
+            if t.startswith(("|--", "+--")):
+                last = t.split()[1]
+            elif "/32 host LOCAL" in t and last:
+                addrs.add(last)
+        for l in (read(f"/proc/{pid}/net/if_inet6") or "").splitlines():
+            f = l.split()
+            addrs.add(":".join(f[0][i:i + 4] for i in range(0, 32, 4)) + f" ({f[5]})")
+        print(f"addresses: {', '.join(sorted(addrs)) or 'none'}")
+    listening = []
+    for proto in ("tcp", "tcp6"):
+        for l in (read(f"/proc/{pid}/net/{proto}") or "").splitlines()[1:]:
+            f = l.split()
+            if f[3] == "0A":
+                listening.append(f"{proto} {hexaddr(f[1])}")
+    print(f"listening in this namespace: {', '.join(listening) or 'nothing on TCP'}")
+    print("unix sockets: a path socket is a file (see files); abstract ones belong to the network namespace.")
+
+    section("devices")
+    if own.get("mnt"):
+        nodes = device_nodes(f"/proc/{pid}/root")
+        print(f"device nodes it can see ({len(nodes)}): " + ", ".join(p for p, *_ in nodes))
+    else:
+        print("the host's /dev (the host's mount namespace)")
+    cg = (read(f"/proc/{pid}/cgroup") or "").strip().split("::")[-1]
+    print("the cgroup device policy is a BPF program; --probe tests it.")
+
+    section("cgroup and limits")
+    print(f"cgroup  {cg}")
+    for k in ("memory.max", "memory.current", "memory.swap.max", "pids.max", "pids.current", "cpu.max", "cpu.weight", "io.max"):
+        v = read(f"/sys/fs/cgroup{cg}/{k}")
+        if v is not None:
+            v = v.strip().replace("\n", "; ")
+            if k.startswith("memory.") and v.isdigit():
+                v = f"{int(v) / 2**30:.2f} GiB"
+            print(f"  {k:16} {v or '-'}")
+    for l in (read(f"/proc/{pid}/limits") or "").splitlines()[1:]:
+        if any(x in l for x in ("open files", "processes", "locked memory", "address space", "core file")):
+            print("  " + " ".join(l.split()))
+
+    section("open now")
+    kinds, devs, files = {}, set(), set()
+    for fd in os.listdir(f"/proc/{pid}/fd") if os.path.isdir(f"/proc/{pid}/fd") else []:
+        t = link(f"/proc/{pid}/fd/{fd}") or ""
+        k = t.split(":")[0] if ":" in t and not t.startswith("/") else "dev" if t.startswith("/dev/") else "file"
+        kinds[k] = kinds.get(k, 0) + 1
+        (devs if k == "dev" else files if k == "file" else set()).add(t)
+    print(", ".join(f"{n} {k}" for k, n in sorted(kinds.items())) or "nothing")
+    if devs:
+        print("devices: " + ", ".join(sorted(devs)))
+
+    if a.probe:
+        section("probe: tested as the process (its cgroup, namespaces, uid and groups)")
+        if os.geteuid() != 0:
+            print("needs root")
+            return
+        res = probe(pid, st, cg, writable, a.path)
+        if "error" in res:
+            print(f"probe failed: {res['error']}")
+        ok = [d for d in res.get("devices", []) if d[4] in ("rw", "r")]
+        print("devices it can open: " + (", ".join(f"{d[0]} ({d[4]})" for d in ok) or "none"))
+        denied = [d for d in res.get("devices", []) if d[4] not in ("rw", "r")]
+        for d in denied:
+            print(f"  {d[0]} ({d[1]} {d[2]}:{d[3]}): {d[4]}")
+        if own.get("mnt"):
+            print("mounts it can write to: " + (", ".join(res.get("writable", [])) or "none"))
+        for p, v in res.get("paths", {}).items():
+            print(f"{p}: {v}")
+
+
+if __name__ == "__main__":
+    main()

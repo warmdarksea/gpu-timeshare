@@ -44,6 +44,13 @@ let
     '';
     passthru = {
       module = ./nix/module.nix;
+      # bin/sandbox-report, with its interpreter: what a process can reach
+      # (doc/SECURITY.md)
+      sandbox-report = pkgs.runCommand "sandbox-report" { } ''
+        mkdir -p $out/bin
+        { echo "#!${pkgs.python3}/bin/python3"; tail -n +3 ${./bin/sandbox-report}; } > $out/bin/sandbox-report
+        chmod 755 $out/bin/sandbox-report
+      '';
       tests.nixos = pkgs.testers.runNixOSTest (import ./nix/test.nix { inherit gpu-timeshare; });
       # the scheduler's TLA+ model (spec/): TLC, three to five models and
       # two timings, must find nobody waits past the claimed bound; and one

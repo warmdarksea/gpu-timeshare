@@ -206,6 +206,9 @@ less is violated. `TestNoStarvation` checks the same bound against
 `Decide` itself, in 500 random worlds, and that two models are never on
 the card at once.
 
+[doc/DESIGN.md](doc/DESIGN.md) has the algorithm in detail, the code
+annotated, and how the TLA+ model maps to it.
+
 ## NixOS
 
 `nix/module.nix` (`(import ./. {}).module`) is `services.gpu-timeshare`.
@@ -223,6 +226,10 @@ exactly those units and nothing else. The sandbox:
 - the `@system-service` syscalls;
 - the model's socket is reachable only by gpu-timeshare;
 - stopping a model stops its whole cgroup, so a stopped model never leaves VRAM behind.
+
+[doc/SECURITY.md](doc/SECURITY.md) has the threats, each sandbox setting,
+the known gaps, and how to examine a running model:
+`sudo bin/sandbox-report PID [--probe]` reads it from the kernel.
 
 ```nix
 services.gpu-timeshare = {
