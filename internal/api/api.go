@@ -183,21 +183,20 @@ func (s *Server) single(endpoint string) handler {
 			paramError(w, "reading the body: "+err.Error(), "")
 			return
 		}
-		var head struct {
-			Model  string `json:"model"`
-			Stream bool   `json:"stream"`
-		}
-		if err := json.Unmarshal(body, &head); err != nil {
+		// the scanner, not json.Unmarshal: the body is mostly a picture
+		head, err := queue.Members(body)
+		if err != nil {
 			paramError(w, "the body is not a JSON object: "+err.Error(), "")
 			return
 		}
-		if head.Stream {
+		if string(head["stream"]) == "true" {
 			paramError(w, "stream is not available: a request waits for its model's turn", "stream")
 			return
 		}
-		m, ok := s.Cfg.Models[head.Model]
+		model, _ := queue.String(head["model"])
+		m, ok := s.Cfg.Models[model]
 		if !ok {
-			apiError(w, 404, "invalid_request_error", "model_not_found", fmt.Sprintf("no model %q here", head.Model))
+			apiError(w, 404, "invalid_request_error", "model_not_found", fmt.Sprintf("no model %q here", model))
 			return
 		}
 		key, err := queue.Key(endpoint, m.Identity(), body)

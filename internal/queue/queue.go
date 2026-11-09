@@ -24,6 +24,13 @@ import (
 // Canonical re-encodes JSON with sorted keys and no insignificant
 // whitespace; numbers keep their literal spelling.
 func Canonical(body []byte) ([]byte, error) {
+	if c, err := fastCanonical(body); err == nil {
+		return c, nil
+	}
+	return slowCanonical(body)
+}
+
+func slowCanonical(body []byte) ([]byte, error) {
 	d := json.NewDecoder(bytes.NewReader(body))
 	d.UseNumber()
 	var v any

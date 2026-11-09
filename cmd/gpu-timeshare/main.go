@@ -3,6 +3,7 @@
 //	gpu-timeshare serve  [--config FILE]               run the server
 //	gpu-timeshare token  add NAME [--admin] | list | remove NAME
 //	gpu-timeshare cache  stats | clear [--model NAME]
+//	gpu-timeshare queue  query | cancel B... | clear | add model=M image=F   the queue, as a client
 //	gpu-timeshare check  [--config FILE]               read the config and say what it holds
 //	gpu-timeshare cert   --hosts a,b [--cert F] [--key F]   a self-signed certificate
 //
@@ -40,6 +41,9 @@ const usage = `usage:
   gpu-timeshare serve  [--config FILE]
   gpu-timeshare token  add NAME [--admin] | list | remove NAME   [--config FILE]
   gpu-timeshare cache  stats | clear [--model NAME]              [--config FILE]
+  gpu-timeshare queue  query [--all] | cancel BATCH... | clear
+                     | add model=M image=FILE|- [prompt=TEXT] [KEY=VALUE...]
+                       [--server URL] [--token T] [--cacert FILE]
   gpu-timeshare check  [--config FILE]
   gpu-timeshare cert   --hosts NAME[,NAME,IP...] [--cert FILE] [--key FILE] [--days N] [--if-missing]
 `
@@ -57,6 +61,8 @@ func main() {
 		err = serve(args)
 	case "token":
 		err = token(args)
+	case "queue":
+		err = queueCmd(args, os.Stdin, os.Stdout)
 	case "cache":
 		err = cache(args)
 	case "check":

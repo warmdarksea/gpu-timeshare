@@ -50,6 +50,10 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
   writes the units, polkit lets the service start/stop exactly those.
   Stop them one `systemctl stop` per unit (polkit refused a multi-unit
   stop in the VM test).
+- `queue.Canonical`'s fast path (`internal/queue/canon.go`) must stay
+  byte-identical to encoding/json's decode-and-re-encode, or every cache
+  key changes. When in doubt it returns errSlow and encoding/json decides;
+  `go test -fuzz FuzzCanonical ./internal/queue` holds the two together.
 
 ## Tests
 

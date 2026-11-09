@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"sync"
 	"time"
 
 	"gpu-timeshare/internal/config"
@@ -218,14 +220,6 @@ type BadRequest struct{ Msg, Param string }
 
 func (e *BadRequest) Error() string { return e.Msg }
 
-// line is one line of a batch input file.
-type line struct {
-	CustomID string          `json:"custom_id"`
-	Method   string          `json:"method"`
-	URL      string          `json:"url"`
-	Body     json.RawMessage `json:"body"`
-}
-
 // New makes a batch: checks the file line by line and queues every line.
 // A file that fails the checks makes a batch that has failed, with the
 // reasons in its errors, as OpenAI does; nothing of it is queued.
@@ -325,103 +319,192 @@ type parsed struct {
 	caches   bool
 }
 
+// checked is one line as a worker leaves it; the checks that depend on the
+// lines before it (duplicates, one model per batch, the line limit) are
+// read's, in order.
+type checked struct {
+	n        int // the line number
+	customID string
+	early    *LineError // before the duplicate check: no custom_id, not JSON
+	err      *LineError // after it
+	model    string
+	late     *LineError // after the one-model check: unknown model, bad body
+	p        parsed
+}
+
+// check is everything about one line that needs no other line. It reads
+// the line once: top-level members, then the body's, then the body's
+// canonical form for the cache key. A line is mostly one picture, and
+// this is what must keep up with the upload.
+func (s *Store) check(n int, raw []byte, start int64, endpoint string, maxBody int64) checked {
+	c := checked{n: n, p: parsed{off: start, len: int64(len(raw))}}
+	bad := func(code, msg, param string) *LineError { return &LineError{Code: code, Message: msg, Param: param} }
+	l, err := queue.Members(trimSpace(raw))
+	if err != nil {
+		c.early = bad("invalid_json_line", "not a JSON object: "+err.Error(), "")
+		return c
+	}
+	str := func(k string) (string, bool) {
+		v, ok := l[k]
+		if !ok || string(v) == "null" {
+			return "", true
+		}
+		return queue.String(v)
+	}
+	var okID, okMethod, okURL bool
+	c.customID, okID = str("custom_id")
+	method, okMethod := str("method")
+	url, okURL := str("url")
+	body := l["body"]
+	switch {
+	case !okID || !okMethod || !okURL:
+		c.early = bad("invalid_json_line", "not a JSON object: custom_id, method and url must be strings", "")
+	case c.customID == "":
+		c.early = bad("missing_required_parameter", "custom_id is required", "custom_id")
+	case method != "POST":
+		c.err = bad("invalid_request", "method must be POST", "method")
+	case url != endpoint:
+		c.err = bad("mismatched_endpoint", fmt.Sprintf("url %q is not the batch's endpoint %q", url, endpoint), "url")
+	case len(body) == 0 || body[0] != '{':
+		c.err = bad("invalid_request", "body must be a JSON object", "body")
+	case maxBody > 0 && int64(len(body)) > maxBody:
+		c.err = bad("request_too_large", fmt.Sprintf("body is over the %d-byte limit", maxBody), "body")
+	}
+	if c.early != nil || c.err != nil {
+		return c
+	}
+	head, err := queue.Members(body)
+	if err != nil {
+		c.late = bad("invalid_json_line", "body: "+err.Error(), "body")
+		return c
+	}
+	c.model, _ = queue.String(head["model"])
+	if c.model == "" {
+		c.err = bad("missing_required_parameter", "body.model is required", "body.model")
+		return c
+	}
+	if string(head["stream"]) == "true" {
+		c.err = bad("invalid_request", "stream is not available in a batch", "body.stream")
+		return c
+	}
+	m, ok := s.Cfg.Models[c.model]
+	if !ok {
+		c.late = bad("model_not_found", fmt.Sprintf("no model %q here", c.model), "body.model")
+		return c
+	}
+	c.p.CustomID, c.p.model, c.p.caches = c.customID, c.model, m.Caches(s.Cfg)
+	if c.p.key, err = queue.Key(endpoint, m.Identity(), body); err != nil {
+		c.late = bad("invalid_json_line", "body: "+err.Error(), "body")
+	}
+	return c
+}
+
 // read checks every line of an input file; the errors are the batch's.
+// Lines are checked on every core, then judged in order here.
 func (s *Store) read(f File, endpoint string) ([]parsed, []LineError, error) {
 	fh, err := os.Open(queue.FilePath(s.Cfg.FilesDir(), f.ID))
 	if err != nil {
 		return nil, nil, err
 	}
 	defer fh.Close()
-	r := bufio.NewReaderSize(fh, 1<<20)
+	maxBody := int64(s.Cfg.Limits.MaxBody)
+
+	type job struct {
+		n     int
+		raw   []byte
+		start int64
+		out   chan checked
+	}
+	workers := runtime.GOMAXPROCS(0)
+	jobs := make(chan job)
+	order := make(chan chan checked, 2*workers) // results in line order; bounds the lines in memory
+	var readErr error
+	go func() {
+		defer close(order)
+		defer close(jobs)
+		r := bufio.NewReaderSize(fh, 1<<20)
+		var off int64
+		for n := 1; ; n++ {
+			raw, err := r.ReadBytes('\n')
+			if len(raw) == 0 && err == io.EOF {
+				return
+			}
+			if err != nil && err != io.EOF {
+				readErr = err
+				return
+			}
+			start := off
+			off += int64(len(raw))
+			if len(trimSpace(raw)) == 0 {
+				continue
+			}
+			out := make(chan checked, 1)
+			order <- out
+			jobs <- job{n, raw, start, out}
+		}
+	}()
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				j.out <- s.check(j.n, j.raw, j.start, endpoint, maxBody)
+			}
+		}()
+	}
+
 	var out []parsed
 	var errs []LineError
 	seen := map[string]bool{}
-	bad := func(n int, code, msg, param string) {
+	bad := func(n int, e *LineError) {
 		if len(errs) < 100 {
 			ln := n
-			errs = append(errs, LineError{Code: code, Message: msg, Param: param, Line: &ln})
+			e.Line = &ln
+			errs = append(errs, *e)
 		}
 	}
-	var off int64
 	var model string
-	maxBody := int64(s.Cfg.Limits.MaxBody)
-	for n := 1; ; n++ {
-		raw, err := r.ReadBytes('\n')
-		if len(raw) == 0 && err == io.EOF {
-			break
-		}
-		if err != nil && err != io.EOF {
-			return nil, nil, err
-		}
-		start, length := off, int64(len(raw))
-		off += length
-		trimmed := trimSpace(raw)
-		if len(trimmed) == 0 {
-			continue
+	full := false
+	for ch := range order {
+		c := <-ch
+		if full {
+			continue // drain, so the reader and workers finish
 		}
 		if s.Cfg.Limits.MaxBatchLines > 0 && len(out) >= s.Cfg.Limits.MaxBatchLines {
-			bad(n, "too_many_requests", fmt.Sprintf("a batch holds at most %d requests", s.Cfg.Limits.MaxBatchLines), "")
-			break
-		}
-		var l line
-		if err := json.Unmarshal(trimmed, &l); err != nil {
-			bad(n, "invalid_json_line", "not a JSON object: "+err.Error(), "")
+			bad(c.n, &LineError{Code: "too_many_requests", Message: fmt.Sprintf("a batch holds at most %d requests", s.Cfg.Limits.MaxBatchLines)})
+			full = true
 			continue
 		}
 		switch {
-		case l.CustomID == "":
-			bad(n, "missing_required_parameter", "custom_id is required", "custom_id")
+		case c.early != nil:
+			bad(c.n, c.early)
 			continue
-		case seen[l.CustomID]:
-			bad(n, "duplicate_custom_id", fmt.Sprintf("custom_id %q appears twice", l.CustomID), "custom_id")
+		case seen[c.customID]:
+			bad(c.n, &LineError{Code: "duplicate_custom_id", Message: fmt.Sprintf("custom_id %q appears twice", c.customID), Param: "custom_id"})
 			continue
-		case l.Method != "POST":
-			bad(n, "invalid_request", "method must be POST", "method")
-			continue
-		case l.URL != endpoint:
-			bad(n, "mismatched_endpoint", fmt.Sprintf("url %q is not the batch's endpoint %q", l.URL, endpoint), "url")
-			continue
-		case len(l.Body) == 0 || l.Body[0] != '{':
-			bad(n, "invalid_request", "body must be a JSON object", "body")
-			continue
-		case maxBody > 0 && int64(len(l.Body)) > maxBody:
-			bad(n, "request_too_large", fmt.Sprintf("body is over the %d-byte limit", maxBody), "body")
+		case c.err != nil:
+			bad(c.n, c.err)
 			continue
 		}
-		seen[l.CustomID] = true
-		var head struct {
-			Model  string `json:"model"`
-			Stream bool   `json:"stream"`
-		}
-		json.Unmarshal(l.Body, &head)
-		if head.Model == "" {
-			bad(n, "missing_required_parameter", "body.model is required", "body.model")
-			continue
-		}
-		if head.Stream {
-			bad(n, "invalid_request", "stream is not available in a batch", "body.stream")
-			continue
-		}
+		seen[c.customID] = true
 		// one model per batch, as OpenAI has it: a client that batches per
 		// model works against both, and needn't know which it talks to
 		if model == "" {
-			model = head.Model
-		} else if head.Model != model {
-			bad(n, "mismatched_model", fmt.Sprintf("body.model %q: this batch is for %q (one model per batch)", head.Model, model), "body.model")
+			model = c.model
+		} else if c.model != model {
+			bad(c.n, &LineError{Code: "mismatched_model", Message: fmt.Sprintf("body.model %q: this batch is for %q (one model per batch)", c.model, model), Param: "body.model"})
 			continue
 		}
-		m, ok := s.Cfg.Models[head.Model]
-		if !ok {
-			bad(n, "model_not_found", fmt.Sprintf("no model %q here", head.Model), "body.model")
+		if c.late != nil {
+			bad(c.n, c.late)
 			continue
 		}
-		p := parsed{CustomID: l.CustomID, model: head.Model, off: start, len: length, caches: m.Caches(s.Cfg)}
-		p.key, err = queue.Key(endpoint, m.Identity(), l.Body)
-		if err != nil {
-			bad(n, "invalid_json_line", "body: "+err.Error(), "body")
-			continue
-		}
-		out = append(out, p)
+		out = append(out, c.p)
+	}
+	wg.Wait()
+	if readErr != nil {
+		return nil, nil, readErr
 	}
 	if len(out) == 0 && len(errs) == 0 {
 		errs = append(errs, LineError{Code: "empty_file", Message: "the input file has no requests"})

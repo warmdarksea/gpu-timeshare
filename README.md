@@ -57,6 +57,34 @@ streamed: `stream: true` is refused.
 - `completion_window` is any duration up to `limits.max_window`, not only `24h`;
 - the only file purpose accepted is `batch`.
 
+### From the shell
+
+`gpu-timeshare queue` is a client of a running server (any machine; the
+token decides what it sees):
+
+```
+export TIMESHARE_SERVER=https://gpu-box:8100 TIMESHARE_TOKEN=gts_...   # or --server/--token; --cacert for a self-signed cert
+gpu-timeshare queue add model=qwen temperature=0 max_tokens=256 prompt='describe it' image=a.jpg image=b.png
+cat c.jpg | gpu-timeshare queue add model=pixai image=-
+gpu-timeshare queue query [--all]     # json: each model's state and queue, and the unfinished batches
+gpu-timeshare queue cancel batch_...  # what is queued fails as cancelled; what is on the card finishes
+gpu-timeshare queue clear             # cancel every unfinished batch you see (an admin: everyone's)
+```
+
+On the server's machine `gpu-timeshare-admin queue ...` (NixOS module) needs only
+`--token`: it finds the server and its certificate in the config.
+
+`add` makes one batch with a request per `image=`, the picture inlined as
+a `data:` URL, and prints the batch. Every other `KEY=VALUE` goes into
+each request's body: JSON if it parses as JSON, a string otherwise.
+
+Queueing keeps up with the upload: a batch's lines are checked and
+cache-keyed on every core, and the key's canonical JSON copies a plain
+string (a picture's base64) as it is instead of decoding and re-encoding
+it. 200 pictures of 1.5 MB: 7.6 s to create before, 0.5 s now
+(`TIMESHARE_BENCH=200,1500 go test ./cmd/gpu-timeshare -run Throughput -v`).
+
+
 ### The cache, over plain HTTP
 
 Send `Cache-Control` (RFC 9111) on a request. On a batch's create, it
