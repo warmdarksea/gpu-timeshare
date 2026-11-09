@@ -213,7 +213,7 @@ Each model is its own systemd unit, `gpu-timeshare-model-NAME`. Only
 gpu-timeshare starts those units, and a polkit rule lets it start and stop
 exactly those units and nothing else. The sandbox:
 
-- a throwaway user per run;
+- a system user of its own (`gtm-NAME`), whose cache can hold the kernels it compiles;
 - a read-only file system, apart from the model's own cache directory;
 - no access to gpu-timeshare's state;
 - the nvidia device nodes and no other devices;

@@ -5,8 +5,8 @@
 # than start and stop exactly those units (a polkit rule), so what runs,
 # and how it is sandboxed, is fixed here, not by the service:
 #
-#   - a throwaway user per run (DynamicUser), the file system read-only
-#     but for its own cache, no home, no access to gpu-timeshare's state;
+#   - a system user of its own (gtm-NAME), the file system read-only but
+#     for its own cache, no home, no access to gpu-timeshare's state;
 #   - the GPU's device nodes and nothing else (DevicePolicy=closed);
 #   - a network namespace of its own (PrivateNetwork): a loopback no one
 #     else shares and nothing beyond it. It answers on a unix socket only
@@ -50,6 +50,26 @@ let
   unitName = name: "gpu-timeshare-model-${lib.replaceStrings [ "/" ":" ] [ "-" "-" ] name}";
   socketOf = name: "${socketDir}/${lib.replaceStrings [ "/" ":" ] [ "-" "-" ] name}.sock";
   units = lib.filterAttrs (_: m: m.isolation == "unit") cfg.models;
+
+  # Each unit model's own user, not DynamicUser: systemd (262 at least)
+  # gives a DynamicUser unit's CacheDirectory= an id-mapped mount where the
+  # file system supports one (ZFS, ext4, tmpfs...), and always mounts it
+  # noexec. Triton and torch compile kernels into that cache and dlopen
+  # them, so every vllm model died on its first kernel ("failed to map
+  # segment from shared object"). A static user's directory is chowned
+  # instead. A name that isn't a valid user name, or is too long, becomes
+  # a hash.
+  modelUser = name:
+    let
+      clean = lib.stringAsChars (c: if builtins.match "[a-z0-9_-]" c != null then c else "-") (lib.toLower name);
+      user = "gtm-${clean}";
+    in
+    if clean == lib.toLower name && lib.stringLength user <= 31 then user
+    else "gtm-${builtins.substring 0 27 (builtins.hashString "sha256" name)}";
+  # not gpu-timeshare-models/: a directory left by a DynamicUser unit is
+  # owned by nobody, and systemd id-maps (noexec) any directory it finds
+  # owned by nobody, whoever runs the unit
+  cacheOf = name: "gpu-timeshare-model-cache/${lib.replaceStrings [ "/" ":" ] [ "-" "-" ] name}";
 
   # a unit model on {port} listens here, on its own loopback, and a proxy
   # in its namespace relays its socket to it
@@ -303,15 +323,23 @@ in
     warnings = lib.optional (!loopback && !cfg.tls.enable)
       "services.gpu-timeshare listens on ${cfg.host} without TLS: tokens cross the network in the clear";
 
-    users.users.gpu-timeshare = {
+    users.users = lib.mapAttrs' (name: _: lib.nameValuePair (modelUser name) {
       isSystemUser = true;
-      group = "gpu-timeshare";
-      home = stateDir;
-      # the models' sockets; process models also want the GPU
-      extraGroups = [ socketGroup ] ++ lib.optionals hasProcessGpu [ "video" "render" ];
+      group = modelUser name;
+      description = "gpu-timeshare model ${name}";
+    }) units // {
+      gpu-timeshare = {
+        isSystemUser = true;
+        group = "gpu-timeshare";
+        home = stateDir;
+        # the models' sockets; process models also want the GPU
+        extraGroups = [ socketGroup ] ++ lib.optionals hasProcessGpu [ "video" "render" ];
+      };
     };
-    users.groups.gpu-timeshare = { };
-    users.groups.${socketGroup} = { };
+    users.groups = lib.mapAttrs' (name: _: lib.nameValuePair (modelUser name) { }) units // {
+      gpu-timeshare = { };
+      ${socketGroup} = { };
+    };
 
     # setgid: every socket a model makes belongs to the group, and with the
     # models' umask only the group (gpu-timeshare) can connect
@@ -396,8 +424,8 @@ in
       environment = {
         # vllm, triton, torch and flashinfer compile and cache kernels: kept
         # across runs, it saves minutes per start
-        HOME = "/var/cache/gpu-timeshare-models/${name}";
-        XDG_CACHE_HOME = "/var/cache/gpu-timeshare-models/${name}";
+        HOME = "/var/cache/${cacheOf name}";
+        XDG_CACHE_HOME = "/var/cache/${cacheOf name}";
       } // m.environment;
       serviceConfig = lib.mkMerge [
         {
@@ -410,10 +438,12 @@ in
           TimeoutStopSec = 60;
           KillMode = "control-group";
 
-          DynamicUser = true;
+          User = modelUser name;
+          Group = modelUser name;
           SupplementaryGroups = [ socketGroup ];
+          RemoveIPC = true;
           UMask = "0007";
-          CacheDirectory = "gpu-timeshare-models/${name}";
+          CacheDirectory = cacheOf name;
           ReadWritePaths = [ socketDir ];
           InaccessiblePaths = [ "-${stateDir}" "-/var/cache/gpu-timeshare" ];
           PrivateTmp = true;
