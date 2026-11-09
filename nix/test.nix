@@ -21,14 +21,12 @@ in
         command = [ stub "--uds" "{socket}" "--name" "upstream-a" "--start" "1s"
           "--probe-read" "/var/lib/gpu-timeshare/timeshare.db,/etc/hostname"
           "--probe-dial" "192.168.1.1:8080,127.0.0.1:8100" ];
-        cost = 0.6;
         concurrency = 2;
         gpu = false;
       };
       models.b = {
         # TCP only: reached through the proxy in its namespace
         command = [ stub "--port" "{port}" "--name" "upstream-b" "--start" "1s" "--child" ];
-        cost = 0.6;
         gpu = false;
       };
       # a child process, not a unit
@@ -36,7 +34,6 @@ in
         isolation = "process";
         # the control for a's probe: outside the units' sandbox, the same dial works
         command = [ stub "--port" "{port}" "--name" "upstream-p" "--start" "0s" "--probe-dial" "192.168.1.1:8080,127.0.0.1:8100" ];
-        cost = 0.1;
         gpu = false;
       };
     };

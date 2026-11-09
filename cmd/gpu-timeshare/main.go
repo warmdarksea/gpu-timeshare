@@ -272,8 +272,7 @@ func check(args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "listen\t%s\n", cfg.Listen)
 	fmt.Fprintf(w, "state\t%s\n", cfg.StateDir)
-	fmt.Fprintf(w, "capacity\t%g\n\n", cfg.Scheduler.Capacity)
-	fmt.Fprintln(w, "MODEL\tCOST\tCONCURRENCY\tRUN\tCACHE\tIDENTITY")
+	fmt.Fprintln(w, "MODEL\tCONCURRENCY\tRUN\tCACHE\tIDENTITY")
 	for _, n := range cfg.Names() {
 		m := cfg.Models[n]
 		how := "unit " + m.Unit
@@ -283,7 +282,7 @@ func check(args []string) error {
 				how = how[:57] + "..."
 			}
 		}
-		fmt.Fprintf(w, "%s\t%g\t%d\t%s\t%v\t%s\n", n, m.Cost, m.Concurrency, how, m.Caches(cfg), m.Identity())
+		fmt.Fprintf(w, "%s\t%d\t%s\t%v\t%s\n", n, m.Concurrency, how, m.Caches(cfg), m.Identity())
 	}
 	return w.Flush()
 }

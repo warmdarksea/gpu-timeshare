@@ -227,12 +227,10 @@ func gone(pid int) bool {
 const twoModels = `
 [models.a]
 command = ["STUB", "--uds", "{socket}", "--name", "upstream-a", "--log", "LOG"]
-cost = 0.6
 concurrency = 2
 
 [models.b]
 command = ["STUB", "--port", "{port}", "--name", "upstream-b", "--log", "LOG", "--child"]
-cost = 0.6
 concurrency = 3
 fingerprint = "weights-b"
 `

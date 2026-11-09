@@ -1,14 +1,15 @@
 ---- MODULE MC ----
-\* Timeslice for TLC. The models are interchangeable (no sizes: Init picks
-\* every packing), so TLC checks one ordering of them for all.
+\* Timeslice for TLC. The models are interchangeable, so TLC checks one
+\* ordering of them for all.
 EXTENDS Timeslice, TLC
 
 Sym == Permutations(Models)
 
-\* the claimed bound: a slice lasts at most a load, its timeslice, the
-\* load already under way when its time ran out, and a drain; a model
-\* with work leads a slice within n of them: what is left of the one it
-\* is in, one per other model, then its own load
-Slice == MaxLoad + MaxTimeslice + MaxLoad + MaxDrain
-Claim == Cardinality(Models) * Slice
+\* the claimed bound: a turn lasts at most a load, its timeslice and a
+\* drain. A model with work waits out its own drain (if it was on the
+\* card), one turn per other model, then its own load.
+Turn1 == MaxLoad + MaxTimeslice + MaxDrain
+Claim == (Cardinality(Models) - 1) * Turn1 + MaxDrain + MaxLoad
+\* one less: TLC must find a wait this long (the claim is tight)
+Tight == Claim - 1
 ====

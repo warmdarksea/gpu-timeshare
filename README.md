@@ -14,13 +14,11 @@ batch.
 - **The OpenAI API.** `/v1/chat/completions` (and any other endpoint you
   list), `/v1/models`, `/v1/files` and `/v1/batches`. Point an OpenAI SDK
   at it with a token as the API key.
-- **Taking turns, without starving anyone.** The models on the card form
-  a *slice*; a waiting model that fits beside it joins it. Once the slice
-  has had the card for `max_timeslice` while another model waits, it
-  drains and leaves, and the model whose turn it is leads the
-  next one. A TLA+ model of the scheduler, checked by TLC, shows every
-  model with work leads a slice within *n* slices (see [The
-  scheduler](#the-scheduler)). Within a model, clients take turns
+- **Taking turns, without starving anyone.** One model has the card at
+  a time. Once it has had it for `max_timeslice` while another model
+  waits, it drains and leaves, and the model whose turn it is loads. A
+  TLA+ model of the scheduler, checked by TLC, shows every model with
+  work is served within *n* turns (see [The scheduler](#the-scheduler)). Within a model, clients take turns
   round-robin, and each client's requests go oldest first (single
   requests ahead of batch lines: someone is holding a connection open for
   those).
@@ -107,9 +105,8 @@ cert = ""
 key  = ""
 
 [scheduler]
-capacity        = 1.0                 # what the loaded models' costs must fit in
 idle            = "10m"               # stop a model after this long with no work (0: never)
-max_timeslice   = "2h"                # the models on the card give way after this, if another model waits
+max_timeslice   = "2h"                # the model on the card gives way this long after loading, if another waits
 max_attempts    = 3                   # per request: a failed connection, a 5xx or a 429 counts
 start_timeout   = "15m"
 request_timeout = "10m"
@@ -131,7 +128,6 @@ max_size   = "0"                      # drop the least recently used past this
 
 [models.qwen]
 command     = ["vllm", "serve", "/models/qwen", "--uds", "{socket}", "--gpu-memory-utilization", "0.95"]
-cost        = 0.95                    # its share of capacity
 concurrency = 8                       # requests in flight to it
 # ready = "/v1/models"                # answers 200 once it's up
 # upstream_model = "..."              # default: the first model its /v1/models lists
@@ -141,7 +137,6 @@ concurrency = 8                       # requests in flight to it
 [models.pixai]
 unit = "pixai.service"                # a systemd unit instead of a command
 url  = "unix:/run/pixai.sock"         # where it answers (http://host:port or unix:/path)
-cost = 0.2
 ```
 
 In a command, `{socket}` becomes a unix socket under `state_dir/run`, and
@@ -170,54 +165,46 @@ in flight. `GET /health` answers with no token.
 
 ## The scheduler
 
-Two levels. Which models are on the card is `Decide`
+Two levels. Which model has the card is `Decide`
 (`internal/sched/policy.go`, one page). Which requests a loaded model gets
 is round-robin between clients, oldest first within each.
 
-A model's `cost` is its share of the card. Models are on the card together
-only while their costs add up to at most `capacity`, and one model loads at
-a time (vLLM sizes its cache from the memory it sees free while loading).
+**One model has the card at a time.** Two models can share it if they fit,
+but sharing buys nothing when both are busy: measured on a 3090 with two
+vLLM servers that fit side by side (deepseek-ocr and joycaption), each ran
+at 49% of its speed alone, 98% of one model's work between them. The GPU
+takes turns between processes; it doesn't run them at once. Sharing only
+saves the swap, and with one model at a time there are no sizes to get
+right. So each model can have the whole card (for vLLM:
+`--gpu-memory-utilization 0.9` or so, a bigger KV cache).
 
-The models on the card form a **slice**. Its **lead** is the model it
-started with, and its clock starts when the lead has loaded. Each round:
+Each round:
 
-1. A draining model with nothing in flight stops, and so does a model with
-   no work for `idle`.
-2. While a model is loading, or the slice is draining, nothing else
-   happens.
-3. Waiting models are in a **turn**: the one that led a slice longest ago
-   goes first (never counts as longest).
-4. The slice has had `max_timeslice`, and a model is waiting: the whole
-   slice drains, and nothing joins it any more.
-5. The turn's model fits: it starts. On an empty card, it leads a new
-   slice.
-6. It doesn't fit, and stopping idle models would make room: they stop,
-   largest first.
-7. Otherwise the first waiting model after it that fits joins the slice.
-   Joining doesn't extend the slice, and doesn't spend the model's turn.
+1. A draining model with nothing in flight stops.
+2. A model with nothing to do stops, at once if another model is waiting,
+   or after `idle`.
+3. A model that loaded `max_timeslice` ago, while another model waits,
+   drains: it finishes what it's doing and takes nothing new.
+4. If the card is free, the waiting model whose **turn** it is starts: the
+   one that loaded longest ago (never counts as longest).
 
-**The guarantee.** Take *n* models, and say a slice lasts at most a load,
-`max_timeslice`, a load and a drain. Then a model with work leads a slice,
-with the card for `max_timeslice`, within *n* slices' time, unless its
-work runs out first. However hostile the loads, drains and arriving work
-are: a load is at most `start_timeout` and a drain at most
-`request_timeout`, so the worst case is *n* × (`max_timeslice` + 2 ×
-`start_timeout` + `request_timeout`); with loads of a few minutes, it is
-about *n* × `max_timeslice`.
+**The guarantee.** Take *n* models, and say a turn lasts at most a load,
+`max_timeslice` and a drain. Then a model with work is served (loaded, with
+the card for `max_timeslice`) within *n* − 1 turns, plus its own drain if it
+was on the card and its own load, unless its work runs out first. However
+hostile the loads, drains and arriving work are: a load is at most
+`start_timeout` and a drain at most `request_timeout`, so the worst case is
+about (*n* − 1) × (`max_timeslice` + `start_timeout` + `request_timeout`);
+with loads of a few minutes, it is about (*n* − 1) × `max_timeslice`. The
+bound is tight: TLC finds a model that waits exactly that long.
 
 `spec/Timeslice.tla` is the same algorithm in TLA+, rule for rule (the
-`[Name]` comments in `policy.go` are its actions). TLC checks the
-guarantee there against every interleaving and every *packing* (which
-sets of models fit on the card together: that is all sizes and capacity
-amount to), for three models
-(`nix-build -A tests.tla`; four are in `spec/four.cfg`,
-which takes a while). `TestNoStarvation` checks the same bound against
-`Decide` itself, in 500 random worlds.
-
-The spec also models the scheduler gpu-timeshare had before (`Policy =
-"rotation"`: each model had its own clock and drained alone). TLC finds it
-starving a big model while two medium ones share the card, and
-`tests.tla` checks that it still does.
+`[Name]` comments in `policy.go` are its actions). `nix-build -A tests.tla`
+has TLC check the guarantee against every interleaving for three, four and
+five models (seconds; six take a few minutes), and check that one tick
+less is violated. `TestNoStarvation` checks the same bound against
+`Decide` itself, in 500 random worlds, and that two models are never on
+the card at once.
 
 ## NixOS
 
@@ -245,7 +232,6 @@ services.gpu-timeshare = {
   settings.scheduler.idle = "10m";
   models.qwen = {
     command = [ "${vllm}/bin/vllm" "serve" "${weights}" "--uds" "{socket}" ];
-    cost = 0.95;
     concurrency = 8;
     serviceConfig.MemoryMax = "64G";   # merged into the unit
   };

@@ -24,7 +24,6 @@
 #     openFirewall = true;
 #     models.qwen = {
 #       command = [ "${vllm}/bin/vllm" "serve" "${weights}" "--uds" "{socket}" ... ];
-#       cost = 0.95;
 #       concurrency = 8;
 #     };
 #   };
@@ -86,11 +85,6 @@ let
         type = types.nullOr types.str;
         default = null;
         description = "Where it answers, when not on `{socket}` (http://127.0.0.1:PORT or unix:/path).";
-      };
-      cost = mkOption {
-        type = types.numbers.between 0 1000;
-        default = 1;
-        description = "Its share of `capacity` (for vllm: its --gpu-memory-utilization).";
       };
       concurrency = mkOption {
         type = types.ints.positive;
@@ -169,7 +163,6 @@ let
 
   modelSettings = name: m:
     lib.filterAttrs (_: v: v != null) {
-      cost = m.cost;
       concurrency = m.concurrency;
       ready = m.ready;
       upstream_model = m.upstreamModel;
@@ -274,7 +267,7 @@ in
       default = { };
       example = lib.literalExpression ''
         {
-          scheduler = { capacity = 1.0; idle = "10m"; max_timeslice = "2h"; max_attempts = 3; };
+          scheduler = { idle = "10m"; max_timeslice = "2h"; max_attempts = 3; };
           limits = { max_file = "1GiB"; max_window = "7d"; file_retention = "30d"; };
           cache = { enabled = true; max_age = "0"; max_unused = "0"; max_size = "0"; };
         }

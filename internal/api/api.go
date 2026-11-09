@@ -469,5 +469,5 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request, c auth.Client) {
 		s.internal(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"object": "timeshare.status", "capacity": s.Cfg.Scheduler.Capacity, "models": st})
+	writeJSON(w, 200, map[string]any{"object": "timeshare.status", "models": st})
 }

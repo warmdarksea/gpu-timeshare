@@ -95,9 +95,8 @@ type TLS struct {
 }
 
 type Scheduler struct {
-	Capacity       float64  `toml:"capacity"`        // what the loaded models' costs must fit in
 	Idle           Duration `toml:"idle"`            // stop a model after this long with no work (0: never)
-	MaxTimeslice   Duration `toml:"max_timeslice"`   // the models on the card give way after this, if another model waits
+	MaxTimeslice   Duration `toml:"max_timeslice"`   // the model on the card gives way this long after loading, if another waits
 	MaxAttempts    int      `toml:"max_attempts"`    // per request, before it fails
 	StartTimeout   Duration `toml:"start_timeout"`   // default for every model
 	RequestTimeout Duration `toml:"request_timeout"` // one request to a model
@@ -129,7 +128,6 @@ type Model struct {
 	// names {socket} or {port} gets its URL from that.
 	URL string `toml:"url"`
 
-	Cost          float64           `toml:"cost"`           // its share of capacity
 	Concurrency   int               `toml:"concurrency"`    // requests in flight to it
 	Ready         string            `toml:"ready"`          // GET path that answers 200 once it is up
 	UpstreamModel string            `toml:"upstream_model"` // the name it expects (default: the first /v1/models lists)
@@ -179,7 +177,6 @@ func Default() *Config {
 		StateDir:  ".",
 		Systemctl: []string{"systemctl"},
 		Scheduler: Scheduler{
-			Capacity:       1.0,
 			Idle:           Duration{10 * time.Minute},
 			MaxTimeslice:   Duration{2 * time.Hour},
 			MaxAttempts:    3,
@@ -203,9 +200,6 @@ func Default() *Config {
 func (c *Config) check() error {
 	if (c.TLS.Cert == "") != (c.TLS.Key == "") {
 		return errors.New("tls: cert and key go together")
-	}
-	if c.Scheduler.Capacity <= 0 {
-		return errors.New("scheduler.capacity must be positive")
 	}
 	if c.Scheduler.MaxAttempts < 1 {
 		return errors.New("scheduler.max_attempts must be at least 1")
@@ -241,9 +235,6 @@ func (c *Config) check() error {
 		if m.URL != "" && !strings.HasPrefix(m.URL, "http://") && !strings.HasPrefix(m.URL, "https://") &&
 			!strings.HasPrefix(m.URL, "unix:") {
 			return fmt.Errorf("model %s: url %q: want http://, https:// or unix:", name, m.URL)
-		}
-		if m.Cost < 0 || m.Cost > c.Scheduler.Capacity {
-			return fmt.Errorf("model %s: cost %g does not fit in capacity %g", name, m.Cost, c.Scheduler.Capacity)
 		}
 		if m.Concurrency == 0 {
 			m.Concurrency = 4

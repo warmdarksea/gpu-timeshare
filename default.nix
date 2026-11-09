@@ -45,21 +45,21 @@ let
     passthru = {
       module = ./nix/module.nix;
       tests.nixos = pkgs.testers.runNixOSTest (import ./nix/test.nix { inherit gpu-timeshare; });
-      # the scheduler's TLA+ model (spec/): TLC, three models, every packing,
-      # two timings; and the old rotation policy must still starve someone
+      # the scheduler's TLA+ model (spec/): TLC, three to five models and
+      # two timings, must find nobody waits past the claimed bound; and one
+      # tick under it (tight.cfg) it must find someone who does
       tests.tla = pkgs.runCommand "gpu-timeshare-tla" { nativeBuildInputs = [ pkgs.tlaplus ]; } ''
         cp ${./spec}/* . && chmod u+w *
-        sed 's/MaxTimeslice = 3/MaxTimeslice = 1/; s/MaxLoad = 1/MaxLoad = 2/; s/MaxDrain = 1/MaxDrain = 3/' \
-          three.cfg > slow.cfg
-        for c in three slow; do
+        sed 's/MaxWait <- Tight/MaxWait <- Claim/' tight.cfg > slow.cfg
+        for c in three four five slow; do
           echo "== $c"
           tlc -workers auto -config $c.cfg -metadir $TMPDIR/$c MC.tla > $c.log 2>&1 || { cat $c.log; exit 1; }
           grep -q "No error has been found" $c.log || { cat $c.log; exit 1; }
           grep "distinct states found" $c.log
         done
-        echo "== rotation (must fail)"
-        if tlc -workers auto -config rotation.cfg -metadir $TMPDIR/r MC.tla > r.log 2>&1; then cat r.log; exit 1; fi
-        grep -q "Invariant Bounded is violated" r.log || { cat r.log; exit 1; }
+        echo "== tight (must fail)"
+        if tlc -workers auto -config tight.cfg -metadir $TMPDIR/t MC.tla > t.log 2>&1; then cat t.log; exit 1; fi
+        grep -q "Invariant Bounded is violated" t.log || { cat t.log; exit 1; }
         touch $out
       '';
     };

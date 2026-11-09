@@ -29,11 +29,9 @@ max_size = "500 MB"
 max_unused = "90d"
 [models.qwen]
 command = ["vllm", "serve", "/nix/store/x-qwen", "--uds", "{socket}"]
-cost = 0.95
 [models.pixai]
 unit = "pixai.service"
 url = "unix:/run/pixai.sock"
-cost = 0.2
 concurrency = 16
 cache = false
 fingerprint = "pixai-v1"
@@ -70,7 +68,7 @@ func TestLoadRefuses(t *testing.T) {
 		"exactly one of":           "[models.a]\ncommand = [\"x\", \"{port}\"]\nunit = \"a.service\"\n",
 		"a unit needs a url":       "[models.a]\nunit = \"a.service\"\n",
 		"neither {socket} nor":     "[models.a]\ncommand = [\"x\"]\n",
-		"does not fit":             "[models.a]\ncommand = [\"x\", \"{port}\"]\ncost = 2\n",
+		"models.a.cost":            "[models.a]\ncommand = [\"x\", \"{port}\"]\ncost = 0.5\n",
 		"no [models.NAME]":         "listen = \"x:1\"\n",
 		"cert and key go together": "[tls]\ncert = \"a\"\n[models.a]\ncommand = [\"x\", \"{port}\"]\n",
 		"duration":                 "[scheduler]\nidle = \"soon\"\n[models.a]\ncommand = [\"x\", \"{port}\"]\n",

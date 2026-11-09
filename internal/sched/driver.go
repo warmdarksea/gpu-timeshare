@@ -29,7 +29,6 @@ type Scheduler struct {
 	running map[int64]run   // request id -> what it is
 	keys    map[string]bool // cache keys being answered
 	cursor  map[string]string
-	slice   time.Time // when the slice's first model loaded; zero: none yet (see Decide)
 	waiters map[int64]chan struct{}
 	wake    chan struct{}
 	ready   chan struct{} // closed once Run has set up
@@ -42,9 +41,8 @@ type slot struct {
 	model      *config.Model
 	server     upstream.Server
 	state      State
-	upSince    time.Time
+	upSince    time.Time // when it last finished loading (Decide's LoadedAt)
 	busyAt     time.Time
-	ledAt      time.Time // when it last led a slice (see Decide)
 	inflight   int
 	startFails int
 	brokenAt   time.Time // zero: not broken
@@ -203,8 +201,8 @@ func (s *Scheduler) round(ctx context.Context) error {
 		if ready > 0 || sl.inflight > 0 || sl.state == Starting {
 			sl.busyAt = now
 		}
-		models = append(models, Model{Name: name, Cost: sl.model.Cost, State: sl.state,
-			Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt, LedAt: sl.ledAt})
+		models = append(models, Model{Name: name, State: sl.state,
+			Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt, LoadedAt: sl.upSince})
 	}
 	for _, name := range refuse {
 		ids, err := s.Q.FailQueued(name, "model_unavailable",
@@ -216,30 +214,26 @@ func (s *Scheduler) round(ctx context.Context) error {
 		s.notifyLocked(ids...)
 	}
 
-	if !s.onCard() {
-		s.slice = time.Time{} // an empty card ends the slice
-	}
-	pol := Policy{MaxTimeslice: s.Cfg.Scheduler.MaxTimeslice.Duration, Idle: s.Cfg.Scheduler.Idle.Duration,
-		Capacity: s.Cfg.Scheduler.Capacity}
-	for _, a := range Decide(models, s.slice, now, pol) {
+	pol := Policy{MaxTimeslice: s.Cfg.Scheduler.MaxTimeslice.Duration, Idle: s.Cfg.Scheduler.Idle.Duration}
+	for _, a := range Decide(models, now, pol) {
 		sl := s.slots[a.Model]
 		switch a.Kind {
 		case Start:
-			if !s.onCard() { // the first of a new slice: its clock starts when it has loaded
-				s.slice = time.Time{}
-			}
 			s.start(ctx, a.Model, sl)
 		case Stop:
-			if sl.state == Up && pol.Idle > 0 && now.Sub(sl.busyAt) >= pol.Idle {
+			switch {
+			case sl.state == Draining:
+				s.logf("%s: drained: stopping", a.Model)
+			case pol.Idle > 0 && now.Sub(sl.busyAt) >= pol.Idle:
 				s.logf("%s: idle for %s: stopping", a.Model, now.Sub(sl.busyAt).Round(time.Second))
-			} else {
-				s.logf("%s: stopping", a.Model)
+			default:
+				s.logf("%s: nothing to do, and a model waits: stopping", a.Model)
 			}
 			srv := sl.server
 			sl.state, sl.server = Down, nil
 			go srv.Stop()
 		case Drain:
-			s.logf("%s: its slice has had %s, and a model waits that doesn't fit: draining", a.Model, now.Sub(s.slice).Round(time.Second))
+			s.logf("%s: it has had the card for %s, and a model waits: draining", a.Model, now.Sub(sl.upSince).Round(time.Second))
 			sl.state = Draining
 		}
 	}
@@ -287,10 +281,6 @@ func (s *Scheduler) start(ctx context.Context, name string, sl *slot) {
 			return
 		}
 		sl.state, sl.upSince, sl.busyAt = Up, time.Now(), time.Now()
-		if s.slice.IsZero() {
-			// the lead has loaded: the slice's clock starts, and its turn is spent
-			s.slice, sl.ledAt = sl.upSince, sl.upSince
-		}
 		s.logf("%s: up after %s (as %q)", name, time.Since(t).Round(time.Millisecond), srv.UpstreamModel())
 		s.Wake()
 	}()
@@ -509,13 +499,12 @@ func (s *Scheduler) stopAll() {
 
 // Status is one model's state, for /v1/timeshare/status.
 type Status struct {
-	Model    string  `json:"model"`
-	State    string  `json:"state"`
-	Cost     float64 `json:"cost"`
-	UpSince  *int64  `json:"up_since"`
-	Inflight int     `json:"in_flight"`
-	Queued   int     `json:"queued"`
-	Broken   string  `json:"unavailable,omitempty"`
+	Model    string `json:"model"`
+	State    string `json:"state"`
+	UpSince  *int64 `json:"up_since"`
+	Inflight int    `json:"in_flight"`
+	Queued   int    `json:"queued"`
+	Broken   string `json:"unavailable,omitempty"`
 }
 
 func (s *Scheduler) Status() ([]Status, error) {
@@ -529,7 +518,7 @@ func (s *Scheduler) Status() ([]Status, error) {
 	var out []Status
 	for _, n := range s.Cfg.Names() {
 		sl := s.slots[n]
-		st := Status{Model: n, State: sl.state.String(), Cost: sl.model.Cost, Inflight: sl.inflight,
+		st := Status{Model: n, State: sl.state.String(), Inflight: sl.inflight,
 			Queued: counts[n] - sl.inflight}
 		if sl.state == Up || sl.state == Draining {
 			t := sl.upSince.Unix()
@@ -541,14 +530,4 @@ func (s *Scheduler) Status() ([]Status, error) {
 		out = append(out, st)
 	}
 	return out, nil
-}
-
-// onCard: some model is starting, up or draining.
-func (s *Scheduler) onCard() bool {
-	for _, sl := range s.slots {
-		if sl.state != Down {
-			return true
-		}
-	}
-	return false
 }

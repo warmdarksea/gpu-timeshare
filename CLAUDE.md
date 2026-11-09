@@ -26,8 +26,11 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 - `policy.go` and `spec/Timeslice.tla` are the same algorithm, rule for
   rule (`[Name]` in `Decide` is the action in the spec). Change them
   together, and run `nix-build -A tests.tla` (TLC) as well as
-  `TestNoStarvation`. TLC and that simulation found several starvation
-  bugs in the first drafts; the comments in the spec and the tests say which.
+  `TestNoStarvation`.
+- One model on the card at a time, deliberately: two busy models sharing
+  it each ran at half speed (measured), so sharing saves only the swap.
+  There are no costs or capacity; don't add them back without a
+  measurement that says sharing pays.
 
 - The contract with a model is the OpenAI HTTP API, nothing else.
   Don't add per-server special cases.
