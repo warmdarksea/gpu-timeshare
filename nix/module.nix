@@ -59,9 +59,17 @@ let
   proxyName = name: "${unitName name}-proxy";
 
   # the GPU, as cgroup device rules: the nvidia nodes by their driver's
-  # names in /proc/devices, so every card and the uvm/caps nodes match
+  # names in /proc/devices, so every card and the uvm/caps nodes match.
+  # Major 195 (/dev/nvidia0.., nvidiactl, nvidia-modeset) is one name,
+  # nvidia-frontend, on older drivers and three on newer ones (595: nvidia,
+  # nvidiactl, nvidia-modeset). Missing one is silent: the unit starts, sees
+  # no GPU, and vllm dies with "Failed to infer device type". systemd skips
+  # a name the running driver doesn't have, so both sets are listed.
   gpuDevices = [
-    "char-nvidia-frontend rw" # /dev/nvidia0.., nvidiactl, nvidia-modeset
+    "char-nvidia-frontend rw" # older drivers: all of major 195
+    "char-nvidia rw" # /dev/nvidia0..
+    "char-nvidiactl rw" # /dev/nvidiactl
+    "char-nvidia-modeset rw" # /dev/nvidia-modeset
     "char-nvidia-uvm rw" # /dev/nvidia-uvm, nvidia-uvm-tools
     "char-nvidia-caps rw" # /dev/nvidia-caps/*
   ];
