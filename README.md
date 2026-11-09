@@ -71,8 +71,9 @@ gpu-timeshare queue cancel batch_...  # what is queued fails as cancelled; what 
 gpu-timeshare queue clear             # cancel every unfinished batch you see (an admin: everyone's)
 ```
 
-On the server's machine `gpu-timeshare-admin queue ...` (NixOS module) needs only
-`--token`: it finds the server and its certificate in the config.
+On the server's machine (NixOS module) `gpu-timeshare queue ...` needs only
+`--token`: it finds the server and its certificate in
+`/etc/gpu-timeshare/timeshare.toml`.
 
 `add` makes one batch with a request per `image=`, the picture inlined as
 a `data:` URL, and prints the batch. Every other `KEY=VALUE` goes into
@@ -273,13 +274,13 @@ services.gpu-timeshare = {
 };
 ```
 
-Make tokens with `sudo -u gpu-timeshare gpu-timeshare-admin token add alice`.
+Make tokens with `sudo -u gpu-timeshare gpu-timeshare token add alice`.
 Clients trust `/var/lib/gpu-timeshare/tls/timeshare.crt`.
 
 ## Building and testing
 
 ```
-nix-build                    # gpu-timeshare, gpu-timeshare-stub; the go tests run in the build
+nix-build                    # gpu-timeshare; the go tests run in the build (-A stub: the fake model server)
 nix-build -A tests.nixos     # VM: the module, sandboxed units, the OpenAI SDK over TLS
 nix-build -A tests.tla       # TLC: the scheduler's model starves no one
 go test ./...                # the same go tests, no nix needed

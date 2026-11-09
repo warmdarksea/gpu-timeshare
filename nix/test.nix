@@ -4,7 +4,7 @@
 # read, can't reach, and what gpu-timeshare can't make systemd do.
 { gpu-timeshare }:
 let
-  stub = "${gpu-timeshare}/bin/gpu-timeshare-stub";
+  stub = "${gpu-timeshare.stub}/bin/gpu-timeshare-stub";
 in
 {
   name = "gpu-timeshare";
@@ -56,11 +56,16 @@ in
     client.wait_for_open_port(8080)
     server.succeed("curl -sf http://192.168.1.1:8080/ >/dev/null")  # reachable, for the server itself
 
-    token = server.succeed("runuser -u gpu-timeshare -- gpu-timeshare-admin token add alice").strip()
+    token = server.succeed("runuser -u gpu-timeshare -- gpu-timeshare token add alice").strip()
     assert token.startswith("gts_"), token
     crt = server.succeed("cat /var/lib/gpu-timeshare/tls/timeshare.crt")
     client.succeed(f"cat > /tmp/ca.crt <<'EOF'\n{crt}EOF")
     print(client.succeed(f"TOKEN={token} python3 /etc/sdk_test.py https://server:8100/v1 /tmp/ca.crt"))
+
+    with subtest("one command: it finds the config in /etc"):
+        server.fail("command -v gpu-timeshare-admin gpu-timeshare-stub")
+        q = server.succeed(f"runuser -u gpu-timeshare -- gpu-timeshare queue query --token {token}")
+        assert '"models"' in q, q
 
     with subtest("the model's sandbox"):
         journal = server.succeed("journalctl -u gpu-timeshare-model-a -o cat")

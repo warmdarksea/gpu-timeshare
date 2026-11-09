@@ -58,7 +58,8 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 ## Tests
 
 `go test ./...` (also inside `nix-build`): end to end against
-`gpu-timeshare-stub`, unit mode against a shell-script systemctl.
+`gpu-timeshare-stub` (not installed: `-A stub`), unit mode against a
+shell-script systemctl.
 `nix-build -A tests.tla`: TLC on the scheduler's model (a few minutes;
 `spec/four.cfg` by hand takes longer).
 `nix-build -A tests.nixos`: the module in a VM, the official OpenAI

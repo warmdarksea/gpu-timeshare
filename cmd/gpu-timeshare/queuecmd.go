@@ -38,7 +38,7 @@ import (
 const queueUsage = `usage: gpu-timeshare queue query [--all] | cancel BATCH... | clear
                          | add model=M image=FILE|- [image=...] [prompt=TEXT] [KEY=VALUE...]
   --server URL   ($TIMESHARE_SERVER; default: the --config server on this machine, else http://127.0.0.1:8100)
-  --config FILE  ($TIMESHARE_CONFIG, ./timeshare.toml) gpu-timeshare-admin passes it: its listen and cert
+  --config FILE  ($TIMESHARE_CONFIG, ./timeshare.toml, /etc/gpu-timeshare/timeshare.toml): its listen and cert
   --token T      ($TIMESHARE_TOKEN; an admin token sees and clears every client's batches)
   --cacert FILE  ($TIMESHARE_CACERT) the server's certificate, for a self-signed one`
 
@@ -133,7 +133,7 @@ func queueCmd(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(pos) == 0 {
 		return errors.New(queueUsage)
 	}
-	// on the server's own machine (gpu-timeshare-admin passes --config):
+	// on the server's own machine (the module's config is in /etc):
 	// its listen address and certificate, unless given
 	if *server == "" {
 		*server = "http://127.0.0.1:8100"

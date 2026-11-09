@@ -106,7 +106,7 @@ concurrency = 1
 	}
 }
 
-// gpu-timeshare-admin passes --config: queue finds the server from it
+// --config (or the system's): queue finds the server from it
 func TestQueueCmdConfig(t *testing.T) {
 	e := start(t, "", twoModels)
 	host := strings.TrimPrefix(e.url, "http://")

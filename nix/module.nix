@@ -29,7 +29,8 @@
 #   };
 #
 # Clients, as the service user:
-#   sudo -u gpu-timeshare gpu-timeshare-admin token add alice   # prints alice's token, once
+#   sudo -u gpu-timeshare gpu-timeshare token add alice   # prints alice's token, once
+# (the config is /etc/gpu-timeshare/timeshare.toml, where gpu-timeshare looks)
 # and then any OpenAI client, with base_url https://HOST:8100/v1 and that
 # token as its API key, trusting /var/lib/gpu-timeshare/tls/timeshare.crt
 # (self-signed, made on the first start, unless tls.certFile is set).
@@ -217,10 +218,6 @@ let
     models = lib.mapAttrs modelSettings cfg.models;
   } cfg.settings);
 
-  admin = pkgs.writeShellScriptBin "gpu-timeshare-admin" ''
-    exec ${lib.getExe cfg.package} "$@" --config ${configFile}
-  '';
-
   hasProcessGpu = lib.any (m: m.isolation == "process" && m.gpu) (lib.attrValues cfg.models);
 in
 {
@@ -347,7 +344,10 @@ in
       ${socketDir}.d = { user = "root"; group = socketGroup; mode = "2770"; };
     };
 
-    environment.systemPackages = [ admin cfg.package ];
+    environment.systemPackages = [ cfg.package ];
+    # where gpu-timeshare looks when not given --config: token, cache and
+    # queue work as they are (the db still wants sudo -u gpu-timeshare)
+    environment.etc."gpu-timeshare/timeshare.toml".source = configFile;
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
 
     # gpu-timeshare may start and stop its model units, and nothing else

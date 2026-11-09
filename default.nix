@@ -1,6 +1,6 @@
 # gpu-timeshare, for nix (not a flake):
 #
-#   nix-build                       gpu-timeshare (and gpu-timeshare-stub, the fake model server the tests use)
+#   nix-build                       gpu-timeshare (one command; -A stub is the fake model server the tests use)
 #   nix-build -A tests.nixos        a VM: the module, sandboxed model units, an OpenAI SDK client over TLS
 #   nix-build -A tests.tla          TLC checks the scheduler's model (spec/): no model starves
 #   nix-shell                       go, gopls
@@ -33,7 +33,7 @@ let
     };
     vendorHash = "sha256-oiFR2zSOSg5J4G78BuisXU4S/1/dqOZ4ZZRm0RSjJmA=";
     env.CGO_ENABLED = "0";
-    subPackages = [ "cmd/gpu-timeshare" "cmd/gpu-timeshare-stub" ];
+    subPackages = [ "cmd/gpu-timeshare" ];
     ldflags = [ "-s" "-w" ];
     # every package's tests, end to end included (the stub stands in for
     # the model servers; a shell script for systemctl)
@@ -44,6 +44,14 @@ let
     '';
     passthru = {
       module = ./nix/module.nix;
+      # the fake model server the tests use: not installed with gpu-timeshare
+      # (one command there), built on its own for the VM test
+      stub = gpu-timeshare.overrideAttrs (old: {
+        pname = "gpu-timeshare-stub";
+        subPackages = [ "cmd/gpu-timeshare-stub" ];
+        doCheck = false;
+        meta = old.meta // { mainProgram = "gpu-timeshare-stub"; };
+      });
       # bin/sandbox-report, with its interpreter: what a process can reach
       # (doc/SECURITY.md)
       sandbox-report = pkgs.runCommand "sandbox-report" { } ''

@@ -7,7 +7,8 @@
 //	gpu-timeshare check  [--config FILE]               read the config and say what it holds
 //	gpu-timeshare cert   --hosts a,b [--cert F] [--key F]   a self-signed certificate
 //
-// The config file is --config, or $TIMESHARE_CONFIG, or ./timeshare.toml.
+// The config file is --config, or $TIMESHARE_CONFIG, or ./timeshare.toml, or
+// /etc/gpu-timeshare/timeshare.toml (where the NixOS module puts it).
 package main
 
 import (
@@ -80,12 +81,26 @@ func main() {
 	}
 }
 
+// systemConfig is where the NixOS module puts the config, so gpu-timeshare
+// on that machine needs no --config.
+const systemConfig = "/etc/gpu-timeshare/timeshare.toml"
+
 func configFlag(fs *flag.FlagSet) *string {
-	def := os.Getenv("TIMESHARE_CONFIG")
-	if def == "" {
-		def = "timeshare.toml"
+	return fs.String("config", defaultConfig(), "the config file ($TIMESHARE_CONFIG, ./timeshare.toml, "+systemConfig+")")
+}
+
+// defaultConfig: $TIMESHARE_CONFIG, else ./timeshare.toml if there is one,
+// else the system's if there is one, else ./timeshare.toml (to complain about).
+func defaultConfig() string {
+	if c := os.Getenv("TIMESHARE_CONFIG"); c != "" {
+		return c
 	}
-	return fs.String("config", def, "the config file ($TIMESHARE_CONFIG)")
+	for _, c := range []string{"timeshare.toml", systemConfig} {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return "timeshare.toml"
 }
 
 // parse lets flags come after positional arguments too.
