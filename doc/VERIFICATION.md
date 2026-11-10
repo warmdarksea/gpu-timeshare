@@ -341,7 +341,9 @@ tenants, models and cards, and checks five invariants in each.
 | TLA+ | Go | Note |
 |---|---|---|
 | `st[c]`, `on[c]`, `owner[c]` | `Card.State`, `.Model`, `.Owner` | |
+| `next[c]` | `Card.Next` | The model the card drains for, or has drained for; `owner[c]` is then the tenant it is for. |
 | `clock[c]` | `now - Card.TurnAt` | Also times a load and a drain. |
+
 | `busy[c]` | `Card.Inflight > 0` | Only "something is in flight". |
 | `q[t][m]` | `Flow.Queued > 0` | Only "the flow has queued requests". The number changes no decision but *short*. |
 | `more[m]` | queued > free slots | The adversary says when a model is short. |
@@ -423,18 +425,23 @@ checked in each.
 | Config | Tenants | Models | Cards | `K` | *Q*, *L*, *D* | `MaxWait` | Result |
 |---|---|---|---|---|---|---|---|
 | `t3m1.cfg` | 3 | 1 | 1 | 1 | 2, 2, 1 | `Claim` (3) | no error (468 states) |
-| `t1m3.cfg` | 1 | 3 | 1 | 3 | 3, 1, 2 | `Claim` (15) | no error (19,256 states) |
-| `t2m2.cfg` | 2 | 2 | 1 | 2 | 2, 2, 2 | `Claim` (16) | no error (30,728 states) |
-| `t3m2.cfg` | 3 | 2 | 1 | 2 | 2, 1, 1 | `Claim` (14) | no error (182,860 states) |
-| `t2m3.cfg` | 2 | 3 | 1 | 3 | 2, 1, 1 | `Claim` (18) | no error (615,868 states) |
-| `one.cfg` | 2 | 3 | 1 | 1 | 2, 1, 1 | `Claim` (10) | no error (51,980 states) |
-| `g2.cfg` | 2 | 2 | 2 | 2 | 2, 1, 1 | `Claim` (10) | no error (320,604 states) |
+| `t1m3.cfg` | 1 | 3 | 1 | 3 | 3, 1, 2 | `Claim` (15) | no error (20,816 states) |
+| `t2m2.cfg` | 2 | 2 | 1 | 2 | 2, 2, 2 | `Claim` (16) | no error (29,836 states) |
+| `t3m2.cfg` | 3 | 2 | 1 | 2 | 2, 1, 1 | `Claim` (14) | no error (167,952 states) |
+| `t2m3.cfg` | 2 | 3 | 1 | 3 | 2, 1, 1 | `Claim` (18) | no error (589,208 states) |
+| `one.cfg` | 2 | 3 | 1 | 1 | 2, 1, 1 | `Claim` (10) | no error (49,240 states) |
+| `g2.cfg` | 2 | 2 | 2 | 2 | 2, 1, 1 | `Claim` (10) | no error (491,166 states) |
 | `tight.cfg` | 1 | 3 | 1 | 3 | 3, 1, 2 | `Claim − 1` (14) | `Bounded` is violated, as it must be |
 
 The whole set takes under a minute. Two larger configurations are not in
 the build: `big.cfg` (3 tenants, 3 models, `K` = 1; several minutes) and
 two cards with three models. Their runs at the final formula had not
 finished when this was written; run them before relying on those sizes.
+
+(The state counts are for the algorithm as it is now. The table of longest
+waits below was measured before drains were reserved, §9 entry 17, and has
+not been measured again; the bound itself still holds in every
+configuration.)
 
 The longest wait TLC can reach, found by lowering `MaxWait` until
 `Bounded` breaks, next to the formula:
