@@ -9,11 +9,11 @@ fails if any answer differs, action for action and line for line.
 One case:
 
     case NOW MAXTIMESLICE LOADRATIO IDLE
-    card ID STATE MODEL OWNER INFLIGHT TURNAT BUSYAT LOAD     ("-": none)
+    card ID STATE MODEL OWNER NEXT INFLIGHT TURNAT BUSYAT LOAD     ("-": none)
     flow TENANT MODEL QUEUED OLDEST
     slot MODEL N
     line TENANT MODELS...            the lines before, in order
-    act KIND CARD MODEL TENANT       what Go decided, in order
+    act KIND CARD MODEL TENANT FOR   what Go decided, in order
     out TENANT MODELS...             the lines after
     end
 
@@ -53,7 +53,7 @@ def showKind : Kind → String
   | .pass => "pass"
 
 def showAct (a : Action String String String) : String :=
-  s!"{showKind a.kind} {a.card} {unopt a.model} {unopt a.tenant}"
+  s!"{showKind a.kind} {a.card} {unopt a.model} {unopt a.tenant} {unopt a.next}"
 
 def toLines (l : List (String × List String)) : Lines String String :=
   { tenants := l.map (·.1)
@@ -69,16 +69,17 @@ def Case.add (c : Case) (ws : List String) : Except String Case :=
   match ws with
   | ["case", now, q, r, i] =>
     pure { c with now := now.toNat!, pol := { maxTimeslice := q.toNat!, loadRatio := r.toNat!, idle := i.toNat! } }
-  | ["card", id, st, m, o, infl, turn, busy, load] =>
+  | ["card", id, st, m, o, nx, infl, turn, busy, load] =>
     let card : Card String String String :=
-      { id := id, st := parseSt st, model := opt m, owner := opt o, inflight := infl.toNat!,
+      { id := id, st := parseSt st, model := opt m, owner := opt o, next := opt nx, inflight := infl.toNat!,
         turnAt := turn.toNat!, busyAt := busy.toNat!, load := load.toNat! }
     pure { c with cards := c.cards ++ [card] }
   | ["flow", t, m, n, old] =>
     pure { c with flows := c.flows ++ [{ tenant := t, model := m, queued := n.toNat!, oldest := old.toNat! }] }
   | ["slot", m, n] => pure { c with slots := c.slots ++ [(m, n.toNat!)] }
   | "line" :: t :: ms => pure { c with lines := c.lines ++ [(t, ms)] }
-  | ["act", k, card, m, t] => pure { c with acts := c.acts ++ [s!"{k} {card} {m} {t}"] }
+  | ["act", k, card, m, t, nx] => pure { c with acts := c.acts ++ [s!"{k} {card} {m} {t} {nx}"] }
+
   | "out" :: t :: ms => pure { c with out := c.out ++ [(t, ms)] }
   | _ => throw ("can't read: " ++ " ".intercalate ws)
 

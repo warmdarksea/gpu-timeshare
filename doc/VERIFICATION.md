@@ -53,12 +53,13 @@ or ends, a load finishes) and at least every 200 ms. In a round it applies
 the first of these rules that has something to do, and repeats until none
 has:
 
-1. **Drained.** A draining card with nothing in flight stops. The card is
-   free.
-2. **Start.** A free card goes to the first tenant that has a lost model,
-   or failing that a short one. "First" means fewest cards held, then the
-   line. The card loads that tenant's first lost model, else its first
-   short one (a *copy*: the model is then on two cards).
+1. **Drained.** A draining card with nothing in flight stops. It is kept
+   for the tenant and the model it drained for (rule 6).
+2. **Start.** A card that drained for somebody loads their model. A free
+   card goes to the first tenant that has a lost model, or failing that a
+   short one. "First" means fewest cards held, then the line. The card
+   loads that tenant's first lost model, else its first short one (a
+   *copy*: the model is then on two cards).
 3. **GiveWay.** No card is free and some model is lost: the card that has
    been idle longest stops. (An idle card does not stop for a copy. An
    idle model is warm, and a copy is only a speed-up.)
@@ -68,8 +69,15 @@ has:
    to the card (below) wants the model that is there. The turn is now that
    tenant's, and a new quantum begins. Nothing is swapped.
 6. **Drain.** A turn is a quantum old, and the tenant with the best claim
-   wants another model. The card drains; rules 1 and 2 follow. Only one
-   card drains at a time, and no turn ends while one does.
+   wants another model. The old turn is over, and the card is that
+   tenant's from now, for that model: it drains *for* them, and rules 1
+   and 2 follow. Nobody else can have the card meanwhile, and the model
+   counts as on a card already, so one claim takes one card. Any number of
+   cards may drain at once.
+
+A card that drains for a tenant, or has drained for it, counts as a card
+that tenant holds, and its model as on a card. So "holds", "lost" and
+"short" below see the cards as they are about to be.
 
 **The best claim** to a card whose turn is a quantum old. A tenant with
 queued requests can:
@@ -117,7 +125,8 @@ Each rule answers a way that a simpler scheduler goes wrong.
 | Swap whenever a turn is over. | Two tenants on the same model would reload it for each other. | Pass: the turn changes hands, the model stays. |
 | Stop an idle model for any other demand. | A warm model is evicted for a copy that only speeds another one up. | GiveWay is for lost models only. |
 | A copy may take any card whose turn is old. | With three cards and two tenants, the odd card swaps every quantum. | A copy only takes a card from an owner who would still hold more afterwards. |
-| Drain a card as soon as a claim exists. | With several cards, one claim drains two of them. | One card drains at a time, and not while a card is free. |
+| Drain a card as soon as a claim exists. | With several cards, one claim drains two of them. | A card drains *for* a claim, and is that claim's from then on: the model counts as on a card, so no second card drains for it. |
+| One card drains at a time (the first fix for the row above). | With several cards, an old turn waits for the drain slot behind other cards' drains: a turn can last *L* + *Q* + many × *D* (§9, entry 17). | Any number of cards drain at once, each for its own claim. |
 
 ## 3. The inputs
 
@@ -153,11 +162,10 @@ order in which they arrive.
 >
 > unless the flow empties first.
 
-On one card this is proved for every number of tenants and models
-(§8.2). On several cards it is what TLC found for two cards and small
-times (§6.5), and it is **not** proved; §8.3 explains why a turn on
-several cards may be longer than *L* + *Q* + *D* by the wait for the one
-card that may drain at a time.
+This is what TLC finds true for one and two cards at small sizes (§6.5),
+and what `TestNoStarvation` samples up to three cards. It is **not**
+proved in Lean for the algorithm as it is now: what is proved is the
+count of turns (§8.2), and §8.3 has the plan for the time.
 
 The last *D* + *L* is the flow's own drain (if its model was up and was
 drained with requests still queued) and its own load.
@@ -546,166 +554,79 @@ defined in `Policy.lean`.
 | `join_nodup`, `mem_join_tenants`, `mem_join_models` | **Lines.** After `join`, the line is exactly the tenants with queued requests, each once, and the same for each tenant's line. | `Proofs/Lines.lean` |
 | `before_join_tenants`, `before_join_models`, `before_toBack` | Newcomers join behind: `join` puts nobody before somebody who was there, and going to the back takes one from before the others and nobody else. | `Proofs/Lines.lean` |
 
-**No starvation, on one card** (`Proofs/Bound.lean`). The system is a card
-and the lines (`Sys`). A history (`Trace`) is any sequence of:
-
-- a round: `decide` on whatever flows there are, at whatever time, with
-  whatever policy;
-- something a model server does between rounds (`Env`): requests come and
-  go, a load finishes, a load fails or a server dies.
-
-> **`turns_bound`.** Take a tenant *t* with requests queued for a model
-> *m*. In any history in which that flow stays queued and *m* is not
-> started, at most ***K*·*N* − 1 turns begin**: a model is started, or a
-> turn passes from one tenant to another. *N* is the most tenants with
-> queued requests at one time, and *K* is the number of *t*'s models with
-> queued requests when the wait begins.
-
-With the turn that may be running when the wait begins, that is §4.1's
-*T*·*k* turns, now for every *T* and *k* and not only the sizes TLC
-reached. Nothing is assumed about the other tenants, the order or number
-of requests, the times, or which loads fail.
-
-The proof is §4.1's argument made exact. `pot` (`Proofs/Potential.lean`)
-counts the tenants before *t* in the line and *t*'s models before *m*,
-with the tenant and the model of a turn that is running counted as gone
-to the back already. Then:
-
-| Lemma | What happens | The measure |
-|---|---|---|
-| `pot_join` | new requests arrive, queues empty | no higher |
-| `pot_ended` | a turn ends: drain, idle stop, failure | no higher |
-| `pot_start` | a turn starts on a free card | **lower** |
-| `pot_pass` | a turn passes to another tenant | **lower** |
-
-The two that lower it need to know who the scheduler picks: on a free
-card, the first in line with its first model (`claim_free`); for a turn
-that is old, *t* or somebody before *t* in the line (`winner_first`), and
-never *t* staying on the model that is there (`winner_lost`: a tenant with
-a lost model moves).
-
-**The scheduler does not sit on a decision** (`Proofs/Progress.lean`, one
-card, while the flow waits): a free card is started on (`progress_free`),
-a card that has drained is stopped (`progress_drained`), and a turn that is
-a quantum old passes or drains (`progress_old`). So between one turn and
-the next there is only what the bound of §4.1 charges for: a load, a
-quantum, the requests in flight.
-
-**No starvation, on one card, in time** (`Proofs/Timed.lean`). Time is in
-ticks, and it moves only from a state in which a round would decide
-nothing, as in the TLA+ model (the scheduler has its say at every
-instant). A load takes at most *L* ticks, or fails; requests in flight on
-a draining card end within *D*.
-
-> **`wait_bound`.** While tenant *t* has requests queued for model *m*,
-> and until *m* is started, at most ***K*·*N*·(*L* + *Q* + *D*) ticks** go
-> by. *Q* is the longest quantum (`max_timeslice`, or `load_ratio` × *L*),
-> and at least one tick, so a quantum of zero is covered.
-
-So *m* is up within *K*·*N* turns and its own load: §4.1's formula for one
-card, without the extra *D* (the drain of the flow's own model, when
-there is one, is inside the first of the *K*·*N* turns). The proof is a
-budget: the time now, plus the turns that can still begin (`phi`) times
-the longest turn, plus the time left in the turn that is running. No step
-raises it (`step_budget`), and a tick lowers the time left by exactly
-one: there is always some left, because a state in which the scheduler
-would decide nothing has no free card, no drained card and no turn that
-is old (the progress theorems).
-
 **No waste, on any number of cards** (`Proofs/NoWaste.lean`).
 
 > **`settled`.** When no rule applies: no draining card has finished; no
-> card is free while a model is lost or short; no card is free or idle
-> while a model is lost; no card has been idle for `idle`; and, unless a
-> card is draining, no turn can be taken: wherever a turn is old enough to
-> have a winner, the winner is the owner, staying.
+> card that drained for somebody waits to be started; no card is free
+> while a model is lost or short; no card is free or idle while a model
+> is lost; no card has been idle for `idle`; and no turn can be taken:
+> wherever a turn is old enough to have a winner, the winner is the owner,
+> staying.
 
 That is `NoWaste` of §4.5 and more, for every world (reachable or not).
-The one thing the scheduler waits for is a drain, because one card drains
-at a time.
+The scheduler never holds a card back and never waits to do what it could
+do now.
 
 **No starvation, on any number of cards, counted in turns**
-(`Proofs/Multi.lean`, `MultiRule.lean`, `MultiBound.lean`). The system is
-the cards and the lines (`MSys`); a history (`MTrace`) is rounds of
-`decide` over all the cards and, between them, whatever the model servers
-do, each on its own card.
+(`Proofs/Winner.lean`, `Multi.lean`, `MultiRule.lean`, `MultiBound.lean`).
+The system is the cards and the lines (`MSys`); a history (`MTrace`) is
+rounds of `decide` over all the cards and, between them, whatever the
+model servers do, each on its own card (requests come and go, a load
+finishes, a load fails, a server dies at work or while it drains).
+
+A turn *begins* when a free card is started on, when a turn passes from
+one tenant to another, and when a card begins to drain for somebody (the
+start that follows that drain is not a new turn).
 
 > **`mturns_bound`.** Take a tenant *t* with requests queued for a model
-> *m*. In any history in which that flow stays queued and *m* is not
-> started, at most ***K*·*N* − 1 charged turns** begin. A turn is charged
-> if it begins while *t* holds no card (whoever it goes to), or if it is
-> *t*'s own.
+> *m*. In any history in which that flow stays queued, *m* is not started
+> and no card drains for it, at most ***K*·*N* − 1 charged turns** begin.
+> A turn is charged if it begins while *t* holds no card (whoever it goes
+> to), or if it is *t*'s own.
 
 Why: while *t* holds no card, every card the scheduler hands out, on a
-free card or by passing a turn, goes to *t* or to a tenant that stood
-before *t* in the line and held no card either (`winner_first`, and the
-same for `claim`). There are fewer than *N* of those, and once one of
-them holds a card it is not one of them again: when its turn ends it goes
-behind *t*. And each turn of *t*'s own starts its first lost model, which
-is *m* or stood before *m* in its line; there are fewer than *K* of those,
-and a model that leaves a card goes behind *m*.
-
-What `mturns_bound` does **not** say is how long *t* can hold a card on
-another model while *m* waits. Turns that begin for other tenants during
-that time are not charged, so they are not bounded. On one card that time
-is one turn, and `wait_bound` covers it. On several cards see §8.3.
+free card, by passing a turn, or by draining for somebody, goes to *t* or
+to a tenant that stood before *t* in the line and held no card either
+(`winner_first`, and the same for `claim`). There are fewer than *N* of
+those, and once one of them holds a card it is not one of them again:
+when its turn ends it goes behind *t*. And each turn of *t*'s own is for
+its first lost model, which is *m* or stood before *m* in its line; there
+are fewer than *K* of those, and a model that leaves a card goes behind
+*m*. The measure is `mPot` (`Proofs/Multi.lean`); `mpot_ended`,
+`mpot_start`, `mpot_pass` and `mpot_congr` say what each kind of change
+to one card does to it, and a drain is an end and a start at once.
 
 The build fails on an unfinished proof (`assert_no_sorry`), and
 `tests.lean` fails if a module of `proof/` was not checked.
 
 ### 8.3 What is not proved yet
 
-**1. A bound in time for a flow on several cards.** This is the gap. What
-is known:
+**1. The bound in time, for the algorithm as it is now.** Before drains
+were reserved (§9, entry 17) there was a proof for one card, `wait_bound`:
+*K*·*N*·(*L* + *Q* + *D*) ticks. It was about the old rule 6 and has been
+taken out with it (`turns_bound` and the progress theorems too). The
+plan for the new rule, for any number of cards:
 
-- While *t* holds no card, `mturns_bound` bounds the turns, and each
-  comes within a turn's time of the last; that part can be done as
-  `wait_bound` was, with the time left taken over all cards. (Not written
-  yet.)
-- While *t* holds a card on another model and *m* waits, *t*'s turn on
-  that card has to end. `settled` gives the first half: once that turn is
-  old, a state in which the scheduler would decide nothing has a card
-  draining, because *t* would win its own card and move. The second half
-  is how many drains can come before *t*'s card's. The rule is "from the
-  owner with the most cards, the oldest turn first", and one card drains
-  at a time. By hand: a card goes before *t*'s if its owner holds more
-  cards than *t*, or as many and an older turn. A card that has drained
-  and restarted has a newer turn, so the "as many and older" ones go at
-  most once each (fewer than *G*). The "more cards" ones lose a card each
-  time, and a tenant can become one of them only by being handed a card
-  while holding exactly as many as *t* and standing before it, which it
-  does at most once before it stands behind *t*. That makes at most about
-  2·*G* + *N* drains, each at most *D*, before *t*'s card drains, unless
-  *t* loses another card first, which restarts the count at most *G*
-  times.
+- the budget is the time now, plus `mPot` times the longest turn
+  (*D* + *L* + *Q*: the drain comes first now), plus the time left: while
+  *t* holds a card, on each of its cards; while it holds none, on some
+  card;
+- `settled` and `winner_first` say that at a tick no turn that matters is
+  old: every old turn has a winner other than its owner staying, so a
+  rule would apply;
+- `mturns_bound`'s lemmas say the measure pays for every turn that
+  begins while *t* holds no card or is *t*'s own; one more is needed, for
+  the turn that takes *t*'s last card (the taker held no card and now
+  stands before *t*, so the measure is lower).
 
-  So the conjecture for several cards is a turn of at most *L* + *Q* +
-  (a small polynomial in *G* and *N*)·*D*, not *L* + *Q* + *D*: the wait
-  for the drain slot is new, and it is real. TLC's two-card runs (§6.5)
-  could not show it: with two cards and *D* of 1 or 2 it is small.
-  Neither the argument nor the bound is machine-checked.
+The expected theorem is §4.1's formula for any number of cards, with the
+turn as above. TLC agrees for one and two cards at small sizes (§6.5).
 
-  Two changes to the algorithm would make this simple, and both are for
-  the owner of the algorithm to decide, because they trade something:
-
-  - *Oldest turn first*, dropping "most cards first". Then at most *G* − 1
-    drains come before any old card's, and a turn is at most
-    *L* + *Q* + *G*·*D*. Cost: a claimant may take a poor owner's only
-    card while a rich owner's is also old, which costs one extra swap
-    before the cards are even again.
-  - *Drains in parallel, each reserved for the claim it is for.* Then no
-    card waits for another's drain, and a turn is *L* + *Q* + *D* on any
-    number of cards. Cost: a draining card has to remember whom it drains
-    for (new state in the driver, the spec and the model), and a free
-    card is no longer simply the best claim's.
-
-**2. The cap *T*·(*M* − 1)** of §4.1. Only *T*·*k* is proved.
+**2. The cap *T*·(*M* − 1)** of §4.1. Only *T*·*k* is proved, and only in
+turns.
 
 **3. That the Lean model and the Go code agree.** That is a test (§8.1);
 §11 is the plan to make it true by construction.
-
-Until then a bound in time on several cards rests on TLC at two cards and
-on `TestNoStarvation`.
 
 ### 8.4 Running it
 
@@ -889,7 +810,34 @@ a few at a time, `-metadir` on disk (§6.6).
 
 ### 9.5 After `6a4b5df`
 
-(Nothing yet.)
+**17. One drain at a time made a turn on several cards wait for the drain
+slot.** *State:* `fae0a85` (the algorithm of `6a4b5df`; `wait_bound`
+proved for one card, `mturns_bound` and `settled` for any number).
+*Defect:* a design one. Rule 6 let one card drain at a time (entry 7's
+fix), and chose "from the owner with the most cards, the oldest turn
+first". On several cards, a tenant holding a card on one model while
+another of its models waited had to wait for its own old card to get the
+drain slot, behind every old card of an owner with more cards. By hand,
+about 2·*G* + *N* drains could come first, each up to *D*; so a turn was
+not *L* + *Q* + *D* but *L* + *Q* + (a polynomial in cards and tenants)
+× *D*, and §4.1's formula, which the doc claimed for any number of cards,
+was not true of several. *How found:* trying to prove a bound in time for
+several cards: `settled` showed that such a tenant's old card implies a
+drain in progress somewhere, and nothing bounded how many. TLC's two-card
+configurations had *D* of 1 or 2 and could not show it; the random
+simulation did not either. *Fix* (commit after `fae0a85`): a card drains
+*for* the claim that took it. `Card.Next` (Go), `next` (spec and Lean) is
+the model it will load; its owner is the new tenant from the moment it
+begins to drain; `held` and `placed` count such a card as that tenant's
+and that model's. `[Drained]` keeps the reservation, `[Start]` honours it
+before anything else, and the "no card is draining" guards on `[Pass]` and
+`[Drain]` are gone. In the driver a server that dies while draining leaves
+the card to whom it was to go. The cost: a free card is no longer always
+the best claim's (a card that has drained goes to whom it drained for,
+even if a tenant with fewer cards has arrived since), and a model is
+loaded for a claim even if that claim's requests went away during the
+drain.
+
 
 ## 10. When you change the algorithm
 

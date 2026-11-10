@@ -40,7 +40,8 @@ None == "none"
 VARIABLES
     st,       \* Cards -> {"down", "starting", "up", "draining"}
     on,       \* Cards -> the model on it (None when down)
-    owner,    \* Cards -> the tenant whose turn it is (None when down)
+    owner,    \* Cards -> the tenant whose turn it is, or is to be (None when free)
+    next,     \* Cards -> the model it drains for, or has drained for (None: nothing)
     clock,    \* Cards -> ticks: starting, of this turn, or draining
     busy,     \* Cards -> BOOLEAN: requests are in flight on it
     q,        \* Tenants -> Models -> BOOLEAN: the flow has queued requests
@@ -51,7 +52,7 @@ VARIABLES
     wait,     \* ticks it has had queued requests while its model was not up
     burst     \* decisions since anything else happened
 
-vars == <<st, on, owner, clock, busy, q, more, line, mline, watched, wait, burst>>
+vars == <<st, on, owner, next, clock, busy, q, more, line, mline, watched, wait, burst>>
 
 Min(a, b)    == IF a < b THEN a ELSE b
 Range(s)     == {s[i] : i \in DOMAIN s}
@@ -62,11 +63,14 @@ Pos(s, x)    == CHOOSE i \in DOMAIN s : s[i] = x
 First(s, S)  == s[CHOOSE i \in DOMAIN s : s[i] \in S /\ \A j \in 1..(i-1) : s[j] \notin S]
 
 Serving(c)  == st[c] \in {"starting", "up"}
-Placed(m)   == \E c \in Cards : Serving(c) /\ on[c] = m
+\* a card that drains for somebody, or has, is theirs already
+Coming(c)   == next[c] # None
+Free(c)     == st[c] = "down" /\ ~Coming(c)
+Placed(m)   == \E c \in Cards : (Serving(c) /\ on[c] = m) \/ next[c] = m
 HasWork(m)  == \E t \in Tenants : q[t][m]
 Unplaced(m) == HasWork(m) /\ ~Placed(m)
 Short(m)    == HasWork(m) /\ Placed(m) /\ more[m]
-Held(t)     == Cardinality({c \in Cards : Serving(c) /\ owner[c] = t})
+Held(t)     == Cardinality({c \in Cards : (Serving(c) \/ Coming(c)) /\ owner[c] = t})
 Idle(c)     == st[c] = "up" /\ ~busy[c] /\ ~HasWork(on[c])
 
 \* what a tenant would put on a free card: a model of its own that is on
@@ -91,18 +95,27 @@ Decision == burst' = burst + 1
 -------------------------------------------------------------------------
 (* The scheduler. These are the rules of policy.go's Decide.             *)
 
-\* a draining card with nothing in flight stops
+\* a draining card with nothing in flight stops; it stays its next tenant's
 Drained(c) ==
     /\ st[c] = "draining" /\ ~busy[c]
     /\ st' = [st EXCEPT ![c] = "down"]
     /\ on' = [on EXCEPT ![c] = None]
-    /\ owner' = [owner EXCEPT ![c] = None]
     /\ Decision
-    /\ UNCHANGED <<clock, busy, q, more, line, mline, watched, wait>>
+    /\ UNCHANGED <<owner, next, clock, busy, q, more, line, mline, watched, wait>>
+
+\* [Start], of a card that drained for somebody: it loads their model
+StartReserved(c) ==
+    /\ st[c] = "down" /\ Coming(c)
+    /\ st' = [st EXCEPT ![c] = "starting"]
+    /\ on' = [on EXCEPT ![c] = next[c]]
+    /\ next' = [next EXCEPT ![c] = None]
+    /\ clock' = [clock EXCEPT ![c] = 0]
+    /\ Decision
+    /\ UNCHANGED <<owner, busy, q, more, line, mline, watched, wait>>
 
 \* a turn begins: the first claim gets the free card
 Start(c) ==
-    /\ st[c] = "down" /\ Claims # {}
+    /\ Free(c) /\ Claims # {}
     /\ LET t == NextClaim
            m == StartPick(t)
        IN /\ st' = [st EXCEPT ![c] = "starting"]
@@ -110,7 +123,7 @@ Start(c) ==
           /\ owner' = [owner EXCEPT ![c] = t]
           /\ clock' = [clock EXCEPT ![c] = 0]
     /\ Decision
-    /\ UNCHANGED <<busy, q, more, line, mline, watched, wait>>
+    /\ UNCHANGED <<next, busy, q, more, line, mline, watched, wait>>
 
 \* a turn ends without a drain: the card stops, its tenant goes to the back
 Stop(c) ==
@@ -118,12 +131,12 @@ Stop(c) ==
     /\ on' = [on EXCEPT ![c] = None]
     /\ owner' = [owner EXCEPT ![c] = None]
     /\ Ended(c)
-    /\ UNCHANGED <<clock, busy, q, more, watched, wait>>
+    /\ UNCHANGED <<next, clock, busy, q, more, watched, wait>>
 
 \* an idle card stops at once when a model is on no card and no card is free
 \* (not for a copy: an idle model is warm, and a copy is only a speed-up)
 GiveWay(c) ==
-    /\ Idle(c) /\ AnyLost /\ \A d \in Cards : st[d] # "down"
+    /\ Idle(c) /\ AnyLost /\ \A d \in Cards : ~Free(d)
     /\ Stop(c) /\ Decision
 
 \* [Expire]. The turn on c is MaxTimeslice old. Who has the best claim to
@@ -148,8 +161,7 @@ Winner(c)     == CHOOSE t \in Cand(c) : \A u \in Cand(c) \ {t} : Less(Rank(c, t)
 Pick(c, t)    == IF Lost(t) # {} THEN First(mline[t], Lost(t))
                  ELSE IF q[t][on[c]] THEN on[c]
                  ELSE First(mline[t], Copies(c, t))
-Expired(c)    == /\ st[c] = "up" /\ clock[c] >= MaxTimeslice /\ Cand(c) # {}
-                 /\ \A d \in Cards : st[d] # "draining"
+Expired(c)    == st[c] = "up" /\ clock[c] >= MaxTimeslice /\ Cand(c) # {}
 
 Passes(c)     == Expired(c) /\ Winner(c) # owner[c] /\ Pick(c, Winner(c)) = on[c]
 
@@ -162,22 +174,25 @@ Pass(c) ==
         /\ clock' = [clock EXCEPT ![c] = 0]
         /\ line' = ToBack(line, owner[c])
     /\ Decision
-    /\ UNCHANGED <<st, on, busy, q, more, mline, watched, wait>>
+    /\ UNCHANGED <<st, on, next, busy, q, more, mline, watched, wait>>
 
 \* the winner wants another model (and no free card can have it, and no turn
-\* can pass instead): the card takes no more requests and
-\* finishes the ones in flight
+\* can pass instead): the old turn is over, and the card is the winner's
+\* from now, for that model. It takes no more requests and finishes the
+\* ones in flight. Any number of cards may drain at once: each is somebody's.
 Drain(c) ==
     /\ Expired(c)
     /\ Pick(c, Winner(c)) # on[c]
-    /\ \A d \in Cards : st[d] # "down" /\ ~Passes(d)
+    /\ \A d \in Cards : ~Free(d) /\ ~Passes(d)
     /\ st' = [st EXCEPT ![c] = "draining"]
     /\ clock' = [clock EXCEPT ![c] = 0]
+    /\ owner' = [owner EXCEPT ![c] = Winner(c)]
+    /\ next' = [next EXCEPT ![c] = Pick(c, Winner(c))]
     /\ Ended(c)
     /\ Decision
-    /\ UNCHANGED <<on, owner, busy, q, more, watched, wait>>
+    /\ UNCHANGED <<on, busy, q, more, watched, wait>>
 
-Decide == \E c \in Cards : Drained(c) \/ Start(c) \/ GiveWay(c) \/ Pass(c) \/ Drain(c)
+Decide == \E c \in Cards : Drained(c) \/ StartReserved(c) \/ Start(c) \/ GiveWay(c) \/ Pass(c) \/ Drain(c)
 
 -------------------------------------------------------------------------
 (* The world.                                                            *)
@@ -192,7 +207,14 @@ Loaded(c) ==
     /\ clock' = [clock EXCEPT ![c] = 0]
     /\ wait' = IF on[c] = watched[2] THEN 0 ELSE wait
     /\ World
-    /\ UNCHANGED <<on, owner, busy, q, more, line, mline, watched>>
+    /\ UNCHANGED <<on, owner, next, busy, q, more, line, mline, watched>>
+
+\* a server dies while it drains: the card has drained
+Died(c) ==
+    /\ st[c] = "draining"
+    /\ busy' = [busy EXCEPT ![c] = FALSE]
+    /\ World
+    /\ UNCHANGED <<st, on, owner, next, clock, q, more, line, mline, watched, wait>>
 
 \* a load fails, or a server dies at work: the turn is over all the same.
 \* (Not the watched model: the claim is about a model that loads when it
@@ -211,7 +233,7 @@ Arrive(t, m) ==
     /\ line' = IF t \in Range(line) THEN line ELSE Append(line, t)
     /\ mline' = [mline EXCEPT ![t] = Append(@, m)]
     /\ World
-    /\ UNCHANGED <<st, on, owner, clock, busy, more, watched, wait>>
+    /\ UNCHANGED <<st, on, owner, next, clock, busy, more, watched, wait>>
 
 \* the flow's last queued request goes to a card that has its model up
 Taken(t, m, c) ==
@@ -222,25 +244,25 @@ Taken(t, m, c) ==
     /\ line' = IF \E n \in Models \ {m} : q[t][n] THEN line ELSE Without(line, t)
     /\ wait' = IF <<t, m>> = watched THEN 0 ELSE wait
     /\ World
-    /\ UNCHANGED <<st, on, owner, clock, more, watched>>
+    /\ UNCHANGED <<st, on, owner, next, clock, more, watched>>
 
 \* requests go in flight (the flow still has more queued), and finish
 Work(c) ==
     /\ st[c] = "up" /\ HasWork(on[c]) /\ ~busy[c]
     /\ busy' = [busy EXCEPT ![c] = TRUE]
     /\ World
-    /\ UNCHANGED <<st, on, owner, clock, q, more, line, mline, watched, wait>>
+    /\ UNCHANGED <<st, on, owner, next, clock, q, more, line, mline, watched, wait>>
 
 Finish(c) ==
     /\ busy[c]
     /\ busy' = [busy EXCEPT ![c] = FALSE]
     /\ World
-    /\ UNCHANGED <<st, on, owner, clock, q, more, line, mline, watched, wait>>
+    /\ UNCHANGED <<st, on, owner, next, clock, q, more, line, mline, watched, wait>>
 
 Flip(m) ==
     /\ more' = [more EXCEPT ![m] = ~@]
     /\ World
-    /\ UNCHANGED <<st, on, owner, clock, busy, q, line, mline, watched, wait>>
+    /\ UNCHANGED <<st, on, owner, next, clock, busy, q, line, mline, watched, wait>>
 
 Overdue == \E c \in Cards :
     \/ st[c] = "starting" /\ clock[c] >= MaxLoad
@@ -253,7 +275,7 @@ Tick ==
                                  ELSE clock[c] + 1]
     /\ wait' = IF q[watched[1]][watched[2]] /\ ~WatchedUp THEN Min(wait + 1, MaxWait + 1) ELSE wait
     /\ World
-    /\ UNCHANGED <<st, on, owner, busy, q, more, line, mline, watched>>
+    /\ UNCHANGED <<st, on, owner, next, busy, q, more, line, mline, watched>>
 
 -------------------------------------------------------------------------
 
@@ -261,6 +283,7 @@ Init ==
     /\ st = [c \in Cards |-> "down"]
     /\ on = [c \in Cards |-> None]
     /\ owner = [c \in Cards |-> None]
+    /\ next = [c \in Cards |-> None]
     /\ clock = [c \in Cards |-> 0]
     /\ busy = [c \in Cards |-> FALSE]
     /\ q = [t \in Tenants |-> [m \in Models |-> FALSE]]
@@ -273,7 +296,7 @@ Init ==
 
 Next ==
     \/ Decide
-    \/ \E c \in Cards : Loaded(c) \/ Fail(c) \/ IdleStop(c) \/ Work(c) \/ Finish(c)
+    \/ \E c \in Cards : Loaded(c) \/ Fail(c) \/ Died(c) \/ IdleStop(c) \/ Work(c) \/ Finish(c)
     \/ \E t \in Tenants, m \in Models : Arrive(t, m) \/ \E c \in Cards : Taken(t, m, c)
     \/ \E m \in Models : Flip(m)
     \/ Tick
@@ -295,7 +318,8 @@ NoKill == \A c \in Cards : st[c] = "down" => ~busy[c]
 \* once a round has settled, no card is free while a model wants one, and
 \* none is idle while a model is on no card
 NoWaste == ~ENABLED Decide =>
-    /\ (Claims = {} \/ \A c \in Cards : st[c] # "down")
+    /\ (Claims = {} \/ \A c \in Cards : ~Free(c))
+
     /\ (~AnyLost \/ \A c \in Cards : ~Idle(c))
 \* a round settles
 Settles == burst <= MaxBurst

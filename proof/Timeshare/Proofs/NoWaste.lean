@@ -6,12 +6,12 @@ No waste, and no decision left pending, on any number of cards:
 - no card is free while a model is lost or short (`claim`);
 - no card is free or idle while a model is lost;
 - no card has been idle for `idle`;
-- and, unless a card is draining, no turn can be taken: wherever a turn is
+- no card that has drained for somebody waits to be started;
+- and no turn can be taken: wherever a turn is
   old enough to have a winner, the winner is the owner, staying.
 
 So the scheduler never holds a card back, and never waits to do what it
-could do now. The one thing it waits for is a drain: one card drains at a
-time.
+could do now.
 -/
 import Timeshare.Proofs.MultiBound
 
@@ -108,11 +108,11 @@ theorem claim_of_winner {w : World T M C} {c : Card T M C} {u : T} {mu : M}
 /-- **No waste, and nothing left undecided.** -/
 theorem settled {w : World T M C} (h : w.rule = none) :
     (∀ c ∈ w.cards, c.st = .draining → c.inflight ≠ 0) ∧
+    (∀ c ∈ w.cards, ¬ (c.st = .down ∧ c.next.isSome = true)) ∧
     ((∃ c ∈ w.cards, c.st = .down) → w.claim = none) ∧
     (w.anyLost = true → ∀ c ∈ w.cards, c.st ≠ .down ∧ w.idleFor 0 c = false) ∧
     (w.pol.idle > 0 → ∀ c ∈ w.cards, w.idleFor w.pol.idle c = false) ∧
-    ((∀ c ∈ w.cards, c.st ≠ .draining) →
-      ∀ c ∈ w.cards, ∀ u mu, w.winner c = some (u, mu) → some u = c.owner ∧ some mu = c.model) := by
+    (∀ c ∈ w.cards, ∀ u mu, w.winner c = some (u, mu) → some u = c.owner ∧ some mu = c.model) := by
   unfold World.rule at h
   simp only at h
   split at h
@@ -120,60 +120,70 @@ theorem settled {w : World T M C} (h : w.rule = none) :
   · rename_i hdrained
     split at h
     · cases h
-    · rename_i hstart
+    · rename_i hres
       split at h
       · cases h
-      · rename_i hgive
+      · rename_i hstart
         split at h
         · cases h
-        · rename_i hidle
-          -- the first three need nothing more
-          have h1 : ∀ c ∈ w.cards, c.st = .draining → c.inflight ≠ 0 := by
-            intro c hc hst h0
-            obtain ⟨i, hi⟩ := indexed_of_mem hc
-            have := List.find?_eq_none.mp hdrained (i, c) hi
-            simp [hst, h0] at this
-          have h2 : (∃ c ∈ w.cards, c.st = .down) → w.claim = none := by
-            rintro ⟨c, hc, hst⟩
-            obtain ⟨i, hi⟩ := indexed_of_mem hc
-            have hsome : ((w.cards.zipIdx.map fun p => (p.2, p.1)).find? fun p => p.2.st = .down).isSome = true := by
-              rw [List.find?_isSome]
-              exact ⟨(i, c), hi, by simp [hst]⟩
-            obtain ⟨⟨j, d⟩, hjd⟩ := Option.isSome_iff_exists.mp hsome
-            cases hcl : w.claim with
-            | none => rfl
-            | some p =>
-              obtain ⟨u, x⟩ := p
-              exact absurd hjd (fun hjd => hstart u x j d hcl hjd)
-          have h3 : w.anyLost = true → ∀ c ∈ w.cards, c.st ≠ .down ∧ w.idleFor 0 c = false := by
-            intro hl
-            have hcl := claim_isSome hl
-            have hnodown : ∀ c ∈ w.cards, c.st ≠ .down := by
-              intro c hc hst
+        · rename_i hgive
+          split at h
+          · cases h
+          · rename_i hidle
+            have h1 : ∀ c ∈ w.cards, c.st = .draining → c.inflight ≠ 0 := by
+              intro c hc hst h0
+              obtain ⟨i, hi⟩ := indexed_of_mem hc
+              have := List.find?_eq_none.mp hdrained (i, c) hi
+              simp [hst, h0] at this
+            have h1' : ∀ c ∈ w.cards, ¬ (c.st = .down ∧ c.next.isSome = true) := by
+              intro c hc hdn
+              obtain ⟨i, hi⟩ := indexed_of_mem hc
+              have := List.find?_eq_none.mp hres (i, c) hi
+              simp [hdn.1, hdn.2] at this
+            have h2 : (∃ c ∈ w.cards, c.st = .down) → w.claim = none := by
+              rintro ⟨c, hc, hst⟩
+              obtain ⟨i, hi⟩ := indexed_of_mem hc
+              have hnext : c.next.isNone = true := by
+                cases hn : c.next with
+                | none => rfl
+                | some z => exact absurd ⟨hst, by simp [hn]⟩ (h1' c hc)
+              have hsome : ((w.cards.zipIdx.map fun p => (p.2, p.1)).find? fun p =>
+                  Decidable.decide (p.2.st = .down) && p.2.next.isNone).isSome = true := by
+                rw [List.find?_isSome]
+                exact ⟨(i, c), hi, by simp [hst, hnext]⟩
+              obtain ⟨⟨j, d⟩, hjd⟩ := Option.isSome_iff_exists.mp hsome
+              cases hcl : w.claim with
+              | none => rfl
+              | some p =>
+                obtain ⟨u, x⟩ := p
+                exact absurd hjd (fun hjd => hstart u x j d hcl hjd)
+            have hnodown_of : w.claim.isSome = true → ∀ c ∈ w.cards, c.st ≠ .down := by
+              intro hcl c hc hst
               rw [h2 ⟨c, hc, hst⟩] at hcl
               cases hcl
-            have hfree : ((w.cards.zipIdx.map fun p => (p.2, p.1)).find? fun p => p.2.st = .down) = none := by
+            have hfree_of : (∀ c ∈ w.cards, c.st ≠ .down) →
+                ((w.cards.zipIdx.map fun p => (p.2, p.1)).find? fun p =>
+                  Decidable.decide (p.2.st = .down) && p.2.next.isNone) = none := by
+              intro hnd
               rw [List.find?_eq_none]
               intro p hp
               obtain ⟨i, c⟩ := p
               have hc : c ∈ w.cards := List.mem_of_getElem? (mem_indexed.mp hp)
-              simpa using hnodown c hc
-            rw [hfree] at hgive
-            simp only [Option.isNone_none, hl, Bool.and_self, ite_true] at hgive
-            intro c hc
-            exact ⟨hnodown c hc, longestIdle_none hgive c hc⟩
-          have h4 : w.pol.idle > 0 → ∀ c ∈ w.cards, w.idleFor w.pol.idle c = false := by
-            intro hpos
-            rw [ite_eq_left hpos] at hidle
-            exact longestIdle_none hidle
-          refine ⟨h1, h2, h3, h4, ?_⟩
-          intro hnodrain c hc u mu hwin
-          split at h
-          · rename_i hany
-            rw [List.any_eq_true] at hany
-            obtain ⟨⟨i, d⟩, hd, hst⟩ := hany
-            exact absurd (by simpa using hst) (hnodrain d (List.mem_of_getElem? (mem_indexed.mp hd)))
-          · split at h
+              simp [hnd c hc]
+            have h3 : w.anyLost = true → ∀ c ∈ w.cards, c.st ≠ .down ∧ w.idleFor 0 c = false := by
+              intro hl
+              have hnodown := hnodown_of (claim_isSome hl)
+              rw [hfree_of hnodown] at hgive
+              simp only [Option.isNone_none, hl, Bool.and_self, ite_true] at hgive
+              intro c hc
+              exact ⟨hnodown c hc, longestIdle_none hgive c hc⟩
+            have h4 : w.pol.idle > 0 → ∀ c ∈ w.cards, w.idleFor w.pol.idle c = false := by
+              intro hpos
+              rw [ite_eq_left hpos] at hidle
+              exact longestIdle_none hidle
+            refine ⟨h1, h1', h2, h3, h4, ?_⟩
+            intro c hc u mu hwin
+            split at h
             · cases h
             · rename_i hpass
               split at h
@@ -183,27 +193,19 @@ theorem settled {w : World T M C} (h : w.rule = none) :
                 have hmod : some mu = c.model := by
                   by_contra hne
                   -- the card is wanted, so it would drain -- unless a card is free; but then it would be started on
-                  have hwanted : (i, c) ∈ (w.cards.zipIdx.map fun p => (p.2, p.1)).filter fun p =>
+                  have hwanted : (i, (c, u, mu)) ∈ (w.cards.zipIdx.map fun p => (p.2, p.1)).filterMap fun p =>
                       match w.winner p.2 with
-                      | some (_, m) => Decidable.decide (some m ≠ p.2.model)
-                      | none => false := by
-                    rw [List.mem_filter]
-                    exact ⟨hi, by simp [hwin, hne]⟩
-                  obtain ⟨⟨j, d⟩, hbest⟩ := Option.isSome_iff_exists.mp
-                    (firstBest_isSome (fun (c b : Card T M C) =>
-                      Decidable.decide (w.heldBy c.owner > w.heldBy b.owner) ||
-                        (Decidable.decide (w.heldBy c.owner = w.heldBy b.owner) && Decidable.decide (c.turnAt < b.turnAt)))
+                      | some (t, m) => if some m ≠ p.2.model then some (p.1, (p.2, t, m)) else none
+                      | none => none := by
+                    rw [List.mem_filterMap]
+                    exact ⟨(i, c), hi, by simp [hwin, hne]⟩
+                  obtain ⟨⟨j, d, t', m'⟩, hbest⟩ := Option.isSome_iff_exists.mp
+                    (firstBest_isSome (fun (x y : Card T M C × T × M) =>
+                      Decidable.decide (w.heldBy x.1.owner > w.heldBy y.1.owner) ||
+                        (Decidable.decide (w.heldBy x.1.owner = w.heldBy y.1.owner) &&
+                          Decidable.decide (x.1.turnAt < y.1.turnAt)))
                       _ (List.ne_nil_of_mem hwanted))
-                  have hcl := claim_of_winner hwin hne
-                  cases hfree : ((w.cards.zipIdx.map fun p => (p.2, p.1)).find? fun p => p.2.st = .down) with
-                  | none => exact hdrain j d hbest hfree
-                  | some p =>
-                    obtain ⟨k, e⟩ := p
-                    have hmem := List.mem_of_find?_eq_some hfree
-                    have hp := List.find?_some hfree
-                    have hdown : e.st = .down := by simpa using hp
-                    rw [h2 ⟨e, List.mem_of_getElem? (mem_indexed.mp hmem), hdown⟩] at hcl
-                    cases hcl
+                  exact hdrain j d t' m' hbest (hfree_of (hnodown_of (claim_of_winner hwin hne)))
                 refine ⟨?_, hmod⟩
                 by_contra hne
                 have := List.findSome?_eq_none_iff.mp hpass (i, c) hi

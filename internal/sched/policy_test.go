@@ -57,10 +57,10 @@ func up(id, model, owner string, turn time.Duration) Card {
 func TestStart(t *testing.T) {
 	var l Lines
 	want(t, decide(pol, []Card{{ID: "c"}}, &l, "bob/qwen", "alice/gemma", "bob/ocr"),
-		Action{Start, "c", "qwen", "bob"})
+		Action{Kind: Start, Card: "c", Model: "qwen", Tenant: "bob"})
 	// the lines remember who came first, whatever order the flows come in
 	want(t, decide(pol, []Card{{ID: "c"}}, &l, "alice/gemma", "bob/ocr", "bob/qwen", "carol/pixai"),
-		Action{Start, "c", "qwen", "bob"})
+		Action{Kind: Start, Card: "c", Model: "qwen", Tenant: "bob"})
 	if !reflect.DeepEqual(l.Tenants, []string{"bob", "alice", "carol"}) || !reflect.DeepEqual(l.Models["bob"], []string{"qwen", "ocr"}) {
 		t.Errorf("lines: %v", l)
 	}
@@ -75,16 +75,18 @@ func TestTurn(t *testing.T) {
 	c := up("c", "gemma", "alice", time.Hour)
 	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/qwen"))
 	c.TurnAt = ago(3 * time.Hour)
-	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/qwen"), Action{Kind: Drain, Card: "c", Model: "gemma"})
-	// its turn is over: alice is behind bob now
+	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/qwen"),
+		Action{Kind: Drain, Card: "c", Model: "gemma", Tenant: "bob", For: "qwen"})
+	// its turn is over: alice is behind bob now, and the card is bob's, for qwen
 	if !reflect.DeepEqual(l.Tenants, []string{"bob", "alice"}) {
 		t.Errorf("line: %v", l.Tenants)
 	}
-	c.State = Draining
+	c.State, c.Owner, c.Next = Draining, "bob", "qwen"
+
 	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/qwen"))
 	c.Inflight = 0
 	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/qwen"),
-		Action{Kind: Stop, Card: "c", Model: "gemma"}, Action{Start, "c", "qwen", "bob"})
+		Action{Kind: Stop, Card: "c", Model: "gemma"}, Action{Kind: Start, Card: "c", Model: "qwen", Tenant: "bob"})
 }
 
 // with nobody else to serve, a model keeps its card whatever its age
@@ -101,11 +103,11 @@ func TestPass(t *testing.T) {
 	var l Lines
 	c := up("c", "gemma", "alice", 3*time.Hour)
 	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/gemma", "carol/qwen"),
-		Action{Pass, "c", "gemma", "bob"})
+		Action{Kind: Pass, Card: "c", Model: "gemma", Tenant: "bob"})
 	// then it is carol's: bob has had his
 	c.Owner = "bob"
 	want(t, decide(pol, []Card{c}, &l, "alice/gemma", "bob/gemma", "carol/qwen"),
-		Action{Kind: Drain, Card: "c", Model: "gemma"})
+		Action{Kind: Drain, Card: "c", Model: "gemma", Tenant: "carol", For: "qwen"})
 }
 
 // a tenant's own models take turns too: its turn is up, another of its
@@ -113,8 +115,8 @@ func TestPass(t *testing.T) {
 func TestOwnModelsTakeTurns(t *testing.T) {
 	var l Lines
 	want(t, decide(pol, []Card{up("c", "gemma", "alice", 3*time.Hour)}, &l, "alice/gemma", "alice/qwen"),
-		Action{Kind: Drain, Card: "c", Model: "gemma"})
-	want(t, decide(pol, []Card{{ID: "c"}}, &l, "alice/gemma", "alice/qwen"), Action{Start, "c", "qwen", "alice"})
+		Action{Kind: Drain, Card: "c", Model: "gemma", Tenant: "alice", For: "qwen"})
+	want(t, decide(pol, []Card{{ID: "c"}}, &l, "alice/gemma", "alice/qwen"), Action{Kind: Start, Card: "c", Model: "qwen", Tenant: "alice"})
 }
 
 // [GiveWay]: nothing to do and a model is on no card: it goes now,
@@ -123,7 +125,7 @@ func TestIdle(t *testing.T) {
 	var l Lines
 	idle := Card{ID: "c", State: Up, Model: "gemma", Owner: "alice", TurnAt: ago(time.Minute), BusyAt: ago(time.Minute)}
 	want(t, decide(pol, []Card{idle}, &l, "bob/qwen"),
-		Action{Kind: Stop, Card: "c", Model: "gemma"}, Action{Start, "c", "qwen", "bob"})
+		Action{Kind: Stop, Card: "c", Model: "gemma"}, Action{Kind: Start, Card: "c", Model: "qwen", Tenant: "bob"})
 	p := Policy{MaxTimeslice: 2 * time.Hour, Idle: 10 * time.Minute}
 	want(t, decide(p, []Card{idle}, &l))
 	idle.BusyAt = ago(11 * time.Minute)
@@ -141,7 +143,7 @@ func TestLoadRatio(t *testing.T) {
 	c.Load = 5 * time.Minute
 	want(t, decide(p, []Card{c}, &l, "alice/qwen", "bob/gemma"))
 	c.TurnAt = ago(20 * time.Minute)
-	want(t, decide(p, []Card{c}, &l, "alice/qwen", "bob/gemma"), Action{Kind: Drain, Card: "c", Model: "qwen"})
+	want(t, decide(p, []Card{c}, &l, "alice/qwen", "bob/gemma"), Action{Kind: Drain, Card: "c", Model: "qwen", Tenant: "bob", For: "gemma"})
 }
 
 // several cards: a model short of cards gets a free one, an owner with
@@ -152,11 +154,11 @@ func TestCards(t *testing.T) {
 	old := 3 * time.Hour
 	// a copy on a free card
 	want(t, decide(pol, []Card{up("c0", "gemma", "alice", old), {ID: "c1"}}, &l, "alice/gemma"),
-		Action{Start, "c1", "gemma", "alice"})
+		Action{Kind: Start, Card: "c1", Model: "gemma", Tenant: "alice"})
 	// bob has no card, alice two: bob's model takes one (the older turn)
 	l = Lines{}
 	cards := []Card{up("c0", "gemma", "alice", old), up("c1", "gemma", "alice", old+time.Minute)}
-	want(t, decide(pol, cards, &l, "alice/gemma", "bob/qwen"), Action{Kind: Drain, Card: "c1", Model: "gemma"})
+	want(t, decide(pol, cards, &l, "alice/gemma", "bob/qwen"), Action{Kind: Drain, Card: "c1", Model: "gemma", Tenant: "bob", For: "qwen"})
 	// one each: nobody takes anything, though both are short of cards
 	l = Lines{}
 	cards = []Card{up("c0", "gemma", "alice", old), up("c1", "qwen", "bob", old)}
@@ -164,7 +166,7 @@ func TestCards(t *testing.T) {
 	// three and one: a copy takes a card (two and two); two and one: it doesn't
 	l = Lines{}
 	cards = []Card{up("c0", "gemma", "alice", old), up("c1", "gemma", "alice", old), up("c2", "gemma", "alice", old), up("c3", "qwen", "bob", old)}
-	want(t, decide(pol, cards, &l, "alice/gemma", "bob/qwen"), Action{Kind: Drain, Card: "c0", Model: "gemma"})
+	want(t, decide(pol, cards, &l, "alice/gemma", "bob/qwen"), Action{Kind: Drain, Card: "c0", Model: "gemma", Tenant: "bob", For: "qwen"})
 	l = Lines{}
 	want(t, decide(pol, cards[1:], &l, "alice/gemma", "bob/qwen"))
 	// an idle card doesn't stop for a copy, only for a model on no card
@@ -172,7 +174,7 @@ func TestCards(t *testing.T) {
 	idle := Card{ID: "c1", State: Up, Model: "ocr", Owner: "bob", TurnAt: ago(old), BusyAt: ago(time.Minute)}
 	want(t, decide(pol, []Card{up("c0", "gemma", "alice", old), idle}, &l, "alice/gemma"))
 	want(t, decide(pol, []Card{up("c0", "gemma", "alice", old), idle}, &l, "alice/gemma", "alice/qwen"),
-		Action{Kind: Stop, Card: "c1", Model: "ocr"}, Action{Start, "c1", "qwen", "alice"})
+		Action{Kind: Stop, Card: "c1", Model: "ocr"}, Action{Kind: Start, Card: "c1", Model: "qwen", Tenant: "alice"})
 }
 
 // Decide is pure: neither the caller's cards nor its lines change
@@ -323,12 +325,16 @@ func (s *sim) step(steady bool) {
 			if c.Inflight > 0 {
 				t.Fatalf("minute %d: %v stops a card with %d in flight", s.minute, a, c.Inflight)
 			}
-			*c = Card{ID: c.ID}
+			if c.State == Draining { // it stays its next tenant's
+				*c = Card{ID: c.ID, Owner: c.Owner, Next: c.Next}
+			} else {
+				*c = Card{ID: c.ID}
+			}
 		case Drain:
 			if c.State != Up || age < s.pol.MaxTimeslice {
 				t.Fatalf("minute %d: %v on a card that is %v, its turn %s old", s.minute, a, c.State, age)
 			}
-			c.State = Draining
+			c.State, c.Owner, c.Next = Draining, a.Tenant, a.For
 			s.left[i] = s.rng.Intn(s.D + 1)
 			if steady {
 				s.left[i] = s.D
@@ -353,7 +359,7 @@ func (s *sim) step(steady bool) {
 	for k, n := range s.q {
 		placed := false
 		for _, c := range s.cards {
-			placed = placed || (c.State == Starting || c.State == Up) && c.Model == k[1]
+			placed = placed || (c.State == Starting || c.State == Up) && c.Model == k[1] || c.Next == k[1]
 		}
 		if n > 0 && !placed {
 			lost = k[1]
@@ -540,8 +546,31 @@ func TestZeroTimeslice(t *testing.T) {
 	}()
 	select {
 	case acts := <-done:
-		want(t, acts, Action{Pass, "c", "gemma", "bob"})
+		want(t, acts, Action{Kind: Pass, Card: "c", Model: "gemma", Tenant: "bob"})
 	case <-time.After(5 * time.Second):
 		t.Fatal("Decide does not return")
 	}
+}
+
+// Cards drain at once, each for the claim that took it, and a card that has
+// drained is that claim's: nobody else can have it meanwhile, whatever
+// their claim.
+func TestReservedDrains(t *testing.T) {
+	var l Lines
+	old := 3 * time.Hour
+	cards := []Card{up("c0", "gemma", "alice", old+time.Minute), up("c1", "ocr", "carol", old)}
+	want(t, decide(pol, cards, &l, "alice/gemma", "carol/ocr", "bob/qwen", "dave/pixai"),
+		Action{Kind: Drain, Card: "c0", Model: "gemma", Tenant: "bob", For: "qwen"},
+		Action{Kind: Drain, Card: "c1", Model: "ocr", Tenant: "dave", For: "pixai"})
+	// c0 has drained. erin, who came since and holds nothing, does not get it: it is bob's
+	cards[0].State, cards[0].Owner, cards[0].Next, cards[0].Inflight = Draining, "bob", "qwen", 0
+	cards[1].State, cards[1].Owner, cards[1].Next = Draining, "dave", "pixai"
+	want(t, decide(pol, cards, &l, "alice/gemma", "carol/ocr", "bob/qwen", "dave/pixai", "erin/joy"),
+		Action{Kind: Stop, Card: "c0", Model: "gemma"},
+		Action{Kind: Start, Card: "c0", Model: "qwen", Tenant: "bob"})
+	// one claim, one card: bob's qwen is coming, so a second old card does not drain for it
+	l = Lines{}
+	cards = []Card{{ID: "c0", State: Draining, Model: "gemma", Owner: "bob", Next: "qwen", Inflight: 2},
+		up("c1", "ocr", "carol", old)}
+	want(t, decide(pol, cards, &l, "carol/ocr", "bob/qwen"))
 }

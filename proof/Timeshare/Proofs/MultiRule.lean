@@ -1,10 +1,16 @@
 /-
-Any number of cards: every rule, and everything a model server does,
-leaves the measure of Multi.lean no higher; a turn that begins while the
-waiting flow's tenant holds no card, and every turn of that tenant's own,
-lowers it. So (`mturns_bound`): while a flow (tenant `t`, model `m`)
-waits, at most `K * N - 1` turns begin that are `t`'s own or begin while
-`t` holds no card.
+Any number of cards: what each kind of change to one card does to the
+measure of Multi.lean.
+
+- `mpot_congr`: a change the measure does not see (requests come and go, a
+  load finishes, a drained card stops, a card that drained for somebody
+  starts their model).
+- `mpot_ended` (Multi.lean): a turn ends.
+- `mpot_start`: a card that was nobody's becomes somebody's.
+- `mpot_pass`: a turn changes hands, the model stays.
+
+A drain is the last two at once: the old turn ends, and the card is the
+winner's from then on.
 -/
 import Timeshare.Proofs.Multi
 
@@ -31,96 +37,87 @@ variable {T M C : Type} [DecidableEq T] [DecidableEq M]
 section multi
 variable (N : Nat) (t : T) (m : M)
 
-/-- A card changes in a way the measure does not see (requests come and
-go, a load finishes, a drained card stops): nothing changes. -/
+/-- A card changes in a way the measure does not see: it is the same
+tenant's as before, with the same model (on it, or coming). -/
 theorem mpot_congr {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c : Card T M C} (c' : Card T M C)
-    (hw : MWaiting N t m cards l) (hi : cards[i]? = some c) (hs : c'.serving = c.serving)
-    (hsame : c.serving = true → c'.owner = c.owner ∧ c'.model = c.model) :
+    (hw : MWaiting N t m cards l) (hi : cards[i]? = some c)
+    (hwho : ∀ v, (c'.taken && Decidable.decide (c'.owner = some v)) =
+      (c.taken && Decidable.decide (c.owner = some v)))
+    (hhas : ∀ y, c'.has y = c.has y) :
     MWaiting N t m (cards.set i c') l ∧ mPot N t m (cards.set i c') l = mPot N t m cards l := by
   have hheld : ∀ v, heldIn (cards.set i c') v = heldIn cards v := by
     intro v
     have := heldIn_set c' v hi
-    by_cases h : c.serving = true
-    · rw [hs, (hsame h).1] at this
-      omega
-    · have h' : c.serving = false := by simpa using h
-      simp only [hs, h', Bool.false_and, Bool.false_eq_true, ite_false] at this
-      omega
-  have hplaced : ∀ y, placedIn (cards.set i c') y = placedIn cards y := by
-    intro y
-    refine any_set_congr _ cards i c c' hi ?_
-    by_cases h : c.serving = true
-    · rw [hs, (hsame h).2]
-    · have h' : c.serving = false := by simpa using h
-      simp [hs, h']
+    rw [hwho v] at this
+    omega
+  have hplaced : ∀ y, placedIn (cards.set i c') y = placedIn cards y := fun y =>
+    any_set_congr _ cards i c c' hi (hhas y)
   refine ⟨⟨hw.nodup, hw.tenant, hw.model, hw.few, ?_⟩, ?_⟩
-  · intro d hd hds
+  · intro d hd
     rcases List.mem_or_eq_of_mem_set hd with h1 | h1
-    · exact hw.away d h1 hds
-    · subst h1
-      have hcs : c.serving = true := by rw [← hs]; exact hds
-      rw [(hsame hcs).2]
-      exact hw.away c (List.mem_of_getElem? hi) hcs
+    · exact hw.away d h1
+    · rw [h1, hhas]
+      exact hw.away c (List.mem_of_getElem? hi)
   · unfold mPot
     rw [show heldIn (cards.set i c') = heldIn cards from funext hheld,
       show placedIn (cards.set i c') = placedIn cards from funext hplaced]
 
-/-- What a start on a free card does to the cards the measure counts. -/
+/-- What it does to the cards the measure counts, when a card that was
+nobody's becomes `u`'s, for `x`. -/
 theorem start_facts {cards : List (Card T M C)} {i : Nat} {c c' : Card T M C} {u : T} {x : M}
-    (hi : cards[i]? = some c) (hs : c.serving = false) (hs' : c'.serving = true) (ho : c'.owner = some u)
-    (hmod : c'.model = some x) :
+    (hi : cards[i]? = some c) (hc : c.taken = false) (hc' : c'.taken = true) (ho : c'.owner = some u)
+    (hx : c'.has x = true) :
     (∀ v, heldIn (cards.set i c') v = heldIn cards v + (if u = v then 1 else 0)) ∧
     (∀ y, placedIn (cards.set i c') y = false → placedIn cards y = false) ∧
     placedIn (cards.set i c') x = true := by
   refine ⟨fun v => ?_, fun y hp => ?_, ?_⟩
   · have := heldIn_set c' v hi
-    simp only [hs, hs', ho, Bool.false_and, Bool.true_and, Bool.false_eq_true, ite_false,
+    simp only [hc, hc', ho, Bool.false_and, Bool.true_and, Bool.false_eq_true, ite_false,
       decide_eq_true_eq, Option.some.injEq] at this
     omega
   · by_contra hpl
     have hpl' : placedIn cards y = true := by simpa using hpl
-    have : placedIn (cards.set i c') y = true := any_of_set _ cards i c c' hi (by simp [hs]) hpl'
+    have : placedIn (cards.set i c') y = true :=
+      any_of_set _ cards i c c' hi (has_of_not_taken hc y) hpl'
     rw [hp] at this
     cases this
   · unfold placedIn
     rw [List.any_eq_true]
-    refine ⟨c', ?_, by simp [hs', hmod]⟩
+    refine ⟨c', ?_, hx⟩
     have hlt : i < cards.length := by
       by_contra h
       rw [List.getElem?_eq_none (by omega)] at hi
       cases hi
     exact List.mem_iff_getElem?.mpr ⟨i, by simp [hlt]⟩
 
-/-- **A turn starts** on a free card, not `m`: the flow still waits. If it
-is `t`'s own turn, or `t` holds no card and the turn goes to somebody
-before it in the line who holds none either, the measure is lower; if `t`
-holds a card, it is no higher. -/
+/-- **A card that was nobody's becomes `u`'s**, for a model `x` other than
+`m`: the flow still waits. The measure is no higher if `u` is not `t`; it
+is lower if `t` holds no card and `u` stood before it in the line holding
+none either, and if `u` is `t` and `x` stood before `m` in its line, on no
+card. -/
 theorem mpot_start {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' : Card T M C} {u : T} {x : M}
-    (hw : MWaiting N t m cards l) (hi : cards[i]? = some c) (hs : c.serving = false)
-    (hs' : c'.serving = true) (ho : c'.owner = some u) (hmod : c'.model = some x) (hxm : x ≠ m) :
+    (hw : MWaiting N t m cards l) (hi : cards[i]? = some c) (hc : c.taken = false)
+    (hc' : c'.taken = true) (ho : c'.owner = some u) (hx : c'.has x = true) (hm : c'.has m = false) :
     MWaiting N t m (cards.set i c') l ∧
-      (u ≠ t → heldIn cards t ≠ 0 → mPot N t m (cards.set i c') l ≤ mPot N t m cards l) ∧
+      (u ≠ t → mPot N t m (cards.set i c') l ≤ mPot N t m cards l) ∧
       (u ≠ t → heldIn cards t = 0 → u ∈ before l.tenants t → heldIn cards u = 0 →
         mPot N t m (cards.set i c') l + 1 ≤ mPot N t m cards l) ∧
       (u = t → x ∈ before (l.models t) m → placedIn cards x = false →
         mPot N t m (cards.set i c') l + 1 ≤ mPot N t m cards l) := by
-  obtain ⟨hheld, hplaced, hx⟩ := start_facts hi hs hs' ho hmod
+  obtain ⟨hheld, hplaced, hxp⟩ := start_facts hi hc hc' ho hx
   have ha : aPart m (l.models t) (placedIn (cards.set i c')) ≤ aPart m (l.models t) (placedIn cards) :=
     aPart_le m (List.Sublist.refl _) fun y _ => hplaced y
   refine ⟨⟨hw.nodup, hw.tenant, hw.model, hw.few, ?_⟩, ?_, ?_, ?_⟩
-  · intro d hd hds
+  · intro d hd
     rcases List.mem_or_eq_of_mem_set hd with h1 | h1
-    · exact hw.away d h1 hds
-    · subst h1
-      rw [hmod]
-      exact fun h => hxm (Option.some.inj h)
-  · intro hut h0
-    have ht' : heldIn (cards.set i c') t = heldIn cards t := by rw [hheld t]; simp [hut]
+    · exact hw.away d h1
+    · rw [h1]; exact hm
+  · intro hut
+    have hp : pPart N t l.tenants (heldIn (cards.set i c')) ≤ pPart N t l.tenants (heldIn cards) :=
+      pPart_le N t (List.Sublist.refl _) (fun w _ hw0 => by rw [hheld w] at hw0; omega) hw.tenant hw.few
+        (fun h0 => by rw [hheld t]; simp [hut, h0])
     unfold mPot
-    have hp : pPart N t l.tenants (heldIn (cards.set i c')) = pPart N t l.tenants (heldIn cards) := by
-      simp [pPart, ht', h0]
-    rw [hp]
-    exact Nat.add_le_add_right (Nat.mul_le_mul_right N ha) _
+    exact Nat.add_le_add (Nat.mul_le_mul_right N ha) hp
   · intro hut h0 hub hu0
     have ht' : heldIn (cards.set i c') t = 0 := by rw [hheld t]; simp [hut, h0]
     have hp := pPart_lt N t (ten := l.tenants) (ten' := l.tenants) (held := heldIn cards)
@@ -134,7 +131,7 @@ theorem mpot_start {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' :
     subst hut
     have ha' := aPart_lt m (ms := l.models u) (ms' := l.models u) (placed := placedIn cards)
       (placed' := placedIn (cards.set i c')) (x := x) (List.Sublist.refl _) (fun y _ => hplaced y) hxb hx0
-      (fun _ => hx)
+      (fun _ => hxp)
     have hN : 1 ≤ N := by
       have := List.length_pos_of_mem hw.tenant
       have := hw.few
@@ -149,17 +146,16 @@ theorem mpot_start {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' :
         aPart m (l.models u) (placedIn (cards.set i c')) * N + N := by ring
     omega
 
-/-- **A turn changes hands** on card `i`, to a tenant other than `t`: the
-flow still waits. If `t` holds no card and the turn goes to somebody before
-it in the line who holds none either, the measure is lower; if `t` holds a
-card, it is no higher. -/
+/-- **A turn changes hands** on card `i`, to a tenant other than `t`, the
+model staying: the flow still waits, and the measure is no higher. It is
+lower if `t` holds no card and the turn goes to somebody before it in the
+line who holds none either. -/
 theorem mpot_pass {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' : Card T M C} {u : T}
-    (hw : MWaiting N t m cards l) (hi : cards[i]? = some c) (hs : c.serving = true)
-    (hs' : c'.serving = true) (ho : c'.owner = some u) (hmod : c'.model = c.model) (hut : u ≠ t)
+    (hw : MWaiting N t m cards l) (hi : cards[i]? = some c) (hs : c.taken = true)
+    (hs' : c'.taken = true) (ho : c'.owner = some u) (hhas : ∀ y, c'.has y = c.has y) (hut : u ≠ t)
     (huo : some u ≠ c.owner) :
     MWaiting N t m (cards.set i c') (l.tenantToBack c.owner) ∧
-      (heldIn cards t ≠ 0 →
-        mPot N t m (cards.set i c') (l.tenantToBack c.owner) ≤ mPot N t m cards l) ∧
+      mPot N t m (cards.set i c') (l.tenantToBack c.owner) ≤ mPot N t m cards l ∧
       (heldIn cards t = 0 → u ∈ before l.tenants t → heldIn cards u = 0 →
         mPot N t m (cards.set i c') (l.tenantToBack c.owner) + 1 ≤ mPot N t m cards l) := by
   have hcmem : c ∈ cards := List.mem_of_getElem? hi
@@ -170,7 +166,7 @@ theorem mpot_pass {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' : 
     simpa [hs, hs', ho] using this
   have hplaced : placedIn (cards.set i c') = placedIn cards := by
     funext y
-    exact any_set_congr _ cards i c c' hi (by simp [hs, hs', hmod])
+    exact any_set_congr _ cards i c c' hi (hhas y)
   have hten : t ∈ (l.tenantToBack c.owner).tenants := by
     cases hown : c.owner with
     | none => simpa using hw.tenant
@@ -181,18 +177,58 @@ theorem mpot_pass {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' : 
     | some v => simpa [(toBack_perm l.tenants v).length_eq] using hw.few
   have ha : aPart m ((l.tenantToBack c.owner).models t) (placedIn (cards.set i c')) =
       aPart m (l.models t) (placedIn cards) := by rw [hplaced]; simp
+  -- nobody new stands before `t`, and nobody before `t` is newly without a card
+  have hsub : (before (l.tenantToBack c.owner).tenants t).Sublist (before l.tenants t) ∨ c.owner = some t := by
+    cases hown : c.owner with
+    | none => left; simp
+    | some v =>
+      by_cases hvt : v = t
+      · right; rw [hvt]
+      · left
+        simp only [tenantToBack_tenants]
+        rw [before_toBack hw.nodup.1 hw.tenant hvt]
+        exact List.filter_sublist
+  have hzero : c.owner ≠ some t → ∀ w ∈ before (l.tenantToBack c.owner).tenants t,
+      heldIn (cards.set i c') w = 0 → heldIn cards w = 0 := by
+    intro hot w hw1 hw0
+    have h1 := hheld w
+    cases hown : c.owner with
+    | none =>
+      simp only [hown, reduceCtorEq, ite_false] at h1
+      omega
+    | some v =>
+      have hvt : v ≠ t := fun h => hot (by rw [hown, h])
+      rw [hown] at hw1
+      simp only [tenantToBack_tenants] at hw1
+      rw [before_toBack hw.nodup.1 hw.tenant hvt, List.mem_filter] at hw1
+      have hwv : w ≠ v := by simpa using hw1.2
+      have hne : ¬ (c.owner = some w) := by rw [hown]; exact fun h => hwv (Option.some.inj h).symm
+      simp only [hne, ite_false] at h1
+      omega
   refine ⟨⟨tenantToBack_nodup _ hw.nodup, hten, by simpa using hw.model, hfew, ?_⟩, ?_, ?_⟩
-  · intro d hd hds
+  · intro d hd
     rcases List.mem_or_eq_of_mem_set hd with h1 | h1
-    · exact hw.away d h1 hds
-    · subst h1
-      rw [hmod]
-      exact hw.away c hcmem hs
-  · intro h0
-    have := pPart_le_max N t (heldIn (cards.set i c')) hten hfew
+    · exact hw.away d h1
+    · rw [h1, hhas]
+      exact hw.away c hcmem
+  · have hp : pPart N t (l.tenantToBack c.owner).tenants (heldIn (cards.set i c')) ≤
+        pPart N t l.tenants (heldIn cards) := by
+      by_cases h0 : heldIn cards t = 0
+      · have hot : c.owner ≠ some t := by
+          intro h
+          have := heldIn_pos hcmem hs h
+          omega
+        rcases hsub with hsub | hsub
+        · refine pPart_le N t hsub (hzero hot) hten hfew fun _ => ?_
+          have := hheld t
+          simp only [hot, hut, ite_false] at this
+          omega
+        · exact absurd hsub hot
+      · have := pPart_le_max N t (heldIn (cards.set i c')) hten hfew
+        simp only [pPart, h0, ite_false] at this ⊢
+        exact this
     unfold mPot
     rw [ha]
-    have hp : pPart N t l.tenants (heldIn cards) = N - 1 := by simp [pPart, h0]
     omega
   · intro h0 hub hu0
     have hot : c.owner ≠ some t := by
@@ -208,29 +244,12 @@ theorem mpot_pass {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c c' : 
       have hne : c.owner ≠ some u := fun h => huo h.symm
       simp only [hne, ite_false, ite_true] at this
       omega
-    have hp : pPart N t (l.tenantToBack c.owner).tenants (heldIn (cards.set i c')) + 1 ≤
-        pPart N t l.tenants (heldIn cards) := by
-      cases hown : c.owner with
-      | none =>
-        refine pPart_lt N t (by simp) (fun w _ hw0 => ?_) h0 ht' hub hu0 fun _ => hu'
-        have := hheld w
-        simp only [hown, reduceCtorEq, ite_false] at this
-        omega
-      | some v =>
-        have hvt : v ≠ t := fun h => hot (by rw [hown, h])
-        have hb := before_toBack hw.nodup.1 hw.tenant hvt
-        refine pPart_lt N t (by simp only [tenantToBack_tenants]; rw [hb]; exact List.filter_sublist)
-          (fun w hw1 hw0 => ?_) h0 ht' hub hu0 fun _ => hu'
-        simp only [tenantToBack_tenants] at hw1
-        rw [hb, List.mem_filter] at hw1
-        have hwv : w ≠ v := by simpa using hw1.2
-        have := hheld w
-        have hne : ¬ (c.owner = some w) := by rw [hown]; exact fun h => hwv (Option.some.inj h).symm
-        simp only [hne, ite_false] at this
-        omega
-    unfold mPot
-    rw [ha]
-    omega
+    rcases hsub with hsub | hsub
+    · have hp := pPart_lt N t hsub (hzero hot) h0 ht' hub hu0 fun _ => hu'
+      unfold mPot
+      rw [ha]
+      omega
+    · exact absurd hsub hot
 
 end multi
 

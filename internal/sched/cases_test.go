@@ -40,8 +40,8 @@ func (s *sim) writeCase(flows []Flow, before Lines, acts []Action, after Lines) 
 	var w strings.Builder
 	fmt.Fprintf(&w, "case %d %d %d %d\n", s.minute, s.pol.MaxTimeslice/time.Minute, int(s.pol.LoadRatio), s.pol.Idle/time.Minute)
 	for _, c := range s.cards {
-		fmt.Fprintf(&w, "card %s %s %s %s %d %d %d %d\n", c.ID, c.State, dash(c.Model), dash(c.Owner), c.Inflight,
-			minutes(c.TurnAt), minutes(c.BusyAt), c.Load/time.Minute)
+		fmt.Fprintf(&w, "card %s %s %s %s %s %d %d %d %d\n", c.ID, c.State, dash(c.Model), dash(c.Owner), dash(c.Next),
+			c.Inflight, minutes(c.TurnAt), minutes(c.BusyAt), c.Load/time.Minute)
 	}
 	for _, f := range flows {
 		fmt.Fprintf(&w, "flow %s %s %d %d\n", f.Tenant, f.Model, f.Queued, f.Oldest)
@@ -51,7 +51,8 @@ func (s *sim) writeCase(flows []Flow, before Lines, acts []Action, after Lines) 
 	}
 	writeLines(&w, "line", before)
 	for _, a := range acts {
-		fmt.Fprintf(&w, "act %s %s %s %s\n", a.Kind, a.Card, dash(a.Model), dash(a.Tenant))
+		fmt.Fprintf(&w, "act %s %s %s %s %s\n", a.Kind, a.Card, dash(a.Model), dash(a.Tenant), dash(a.For))
+
 	}
 	writeLines(&w, "out", after)
 	w.WriteString("end\n")

@@ -45,7 +45,8 @@ type card struct {
 	model    *config.Model
 	server   upstream.Server
 	state    State
-	owner    string        // the tenant whose turn it is
+	owner    string        // the tenant whose turn it is, or will be once it has drained
+	next     string        // the model it drains for, or has drained for (Decide's Next)
 	turnAt   time.Time     // when the turn began (Decide's TurnAt)
 	upSince  time.Time     // when the model finished loading
 	load     time.Duration // how long that took
@@ -241,7 +242,7 @@ func (s *Scheduler) round(ctx context.Context) error {
 	var cards []Card
 	byID := map[string]*card{}
 	for _, c := range s.cards {
-		v := Card{ID: c.id, State: c.state, Owner: c.owner, Inflight: c.inflight, TurnAt: c.turnAt, Load: c.load}
+		v := Card{ID: c.id, State: c.state, Owner: c.owner, Next: c.next, Inflight: c.inflight, TurnAt: c.turnAt, Load: c.load}
 		if c.model != nil {
 			v.Model = c.model.Name
 			if c.inflight > 0 || work[v.Model] > 0 || c.state == Starting {
@@ -278,15 +279,19 @@ func (s *Scheduler) round(ctx context.Context) error {
 				s.logf("%s: nothing to do, and a model waits: stopping", s.on(c, a.Model))
 			}
 			srv := c.server
-			*c = card{id: c.id, gpu: c.gpu}
+			if c.state == Draining { // it stays its next tenant's: Decide starts their model on it
+				*c = card{id: c.id, gpu: c.gpu, owner: c.owner, next: c.next}
+			} else {
+				*c = card{id: c.id, gpu: c.gpu}
+			}
 			go srv.Stop()
 		case Drain:
 			if c.state != Up {
 				continue
 			}
-			s.logf("%s: %s's turn is %s old, and another model's turn has come: draining",
-				s.on(c, a.Model), c.owner, now.Sub(c.turnAt).Round(100*time.Millisecond))
-			c.state = Draining
+			s.logf("%s: %s's turn is %s old: draining, for %s (%s's turn)",
+				s.on(c, a.Model), c.owner, now.Sub(c.turnAt).Round(100*time.Millisecond), a.For, a.Tenant)
+			c.state, c.owner, c.next = Draining, a.Tenant, a.For
 		case Pass:
 			s.logf("%s: the turn passes from %s to %s", s.on(c, a.Model), c.owner, a.Tenant)
 			c.owner, c.turnAt = a.Tenant, now
@@ -315,14 +320,19 @@ func (s *Scheduler) failed(c *card, why string) {
 		h.brokenAt = time.Now()
 		s.logf("%s: refusing its requests for %s", name, s.Cfg.Scheduler.BrokenFor.Duration)
 	}
-	if c.state != Draining { // a draining card's turn ended when it began to drain
-		s.lines.Ended(c.owner, name)
+	if c.state == Draining {
+		// its turn ended when it began to drain, and the next one is already
+		// somebody's: the card is theirs, as if it had drained
+		*c = card{id: c.id, gpu: c.gpu, owner: c.owner, next: c.next}
+		return
 	}
+	s.lines.Ended(c.owner, name)
 	*c = card{id: c.id, gpu: c.gpu}
 }
 
 func (s *Scheduler) start(ctx context.Context, c *card, m *config.Model, tenant string) {
-	c.model, c.owner, c.state = m, tenant, Starting
+	c.model, c.owner, c.state, c.next = m, tenant, Starting, ""
+
 	srv, err := s.NewServer(m, c.gpu)
 	if err != nil {
 		s.health[m.Name].startFails = 2 // nothing to retry

@@ -21,18 +21,22 @@
 //
 // The rules, in the order Decide tries them, until none applies:
 //
-//	[Drained]   a draining card with nothing in flight stops.
-//	[Start]     a free card goes to the first tenant with a lost model
-//	            (failing that, a short one): fewest cards first, then the
-//	            line. It loads that tenant's first lost model.
+//	[Drained]   a draining card with nothing in flight stops. It is kept for
+//	            the tenant and the model it drained for.
+//	[Start]     a card that drained for somebody loads their model. A free
+//	            card goes to the first tenant with a lost model (failing
+//	            that, a short one): fewest cards first, then the line. It
+//	            loads that tenant's first lost model.
 //	[GiveWay]   no card is free and a model is lost: an idle card stops.
 //	[IdleStop]  a card idle for Policy.Idle stops.
 //	[Pass]      a turn is a quantum old, and the tenant with the best
 //	            claim to the card wants the model that is there: the turn
 //	            is that tenant's now. Nothing is swapped.
-//	[Drain]     as [Pass], but it wants another model: the card takes no
-//	            more requests, finishes the ones in flight, and [Drained]
-//	            and [Start] follow. One card drains at a time.
+//	[Drain]     as [Pass], but it wants another model: the turn is that
+//	            tenant's now, for that model. The card takes no more
+//	            requests and finishes the ones in flight; [Drained] and
+//	            [Start] follow, and nobody else can have the card
+//	            meanwhile. Any number of cards may drain at once.
 //
 // The best claim to a card whose turn is a quantum old ([Pass], [Drain]):
 // a tenant may move a lost model there, stay (it has queued requests for
@@ -62,7 +66,7 @@ const (
 	Down State = iota
 	Starting
 	Up
-	Draining // finishing what's in flight, taking nothing new, then stops
+	Draining // finishing what's in flight, taking nothing new, then it stops and loads Next
 )
 
 func (s State) String() string { return [...]string{"down", "starting", "up", "draining"}[s] }
@@ -72,7 +76,8 @@ type Card struct {
 	ID       string
 	State    State
 	Model    string        // what is on it ("" when down)
-	Owner    string        // the tenant whose turn it is
+	Owner    string        // the tenant whose turn it is; of a card that drains or has drained, whose it will be
+	Next     string        // what it drains for, or has drained for: the model it loads next ("": nothing)
 	Inflight int           // requests being answered on it
 	TurnAt   time.Time     // when this turn began: the load finished, or the turn passed
 	BusyAt   time.Time     // the last time it had work
@@ -114,7 +119,7 @@ type ActionKind int
 const (
 	Start ActionKind = iota // load Model on Card; the turn is Tenant's
 	Stop                    // stop what is on Card
-	Drain                   // send Card no more requests; it stops once it has finished
+	Drain                   // send Card no more requests; once it has finished it loads For, for Tenant
 	Pass                    // the turn on Card is Tenant's now
 )
 
@@ -125,6 +130,7 @@ type Action struct {
 	Card   string
 	Model  string
 	Tenant string
+	For    string // Drain: the model the card drains for
 }
 
 // Decide is one round of the scheduling algorithm: what to do with the
@@ -144,18 +150,25 @@ func Decide(cards []Card, flows []Flow, slots map[string]int, lines Lines, now t
 
 // rule applies the first rule that has something to do.
 func (w *world) rule() (Action, bool) {
-	// [Drained]
+	// [Drained]: it stops, and stays its next tenant's
 	for i, c := range w.cards {
 		if c.State == Draining && c.Inflight == 0 {
-			w.cards[i] = Card{ID: c.ID}
+			w.cards[i] = Card{ID: c.ID, Owner: c.Owner, Next: c.Next}
 			return Action{Kind: Stop, Card: c.ID, Model: c.Model}, true
 		}
 	}
+	// [Start]: a card that drained for somebody
+	for i, c := range w.cards {
+		if c.State == Down && c.Next != "" {
+			w.cards[i] = Card{ID: c.ID, State: Starting, Model: c.Next, Owner: c.Owner}
+			return Action{Kind: Start, Card: c.ID, Model: c.Next, Tenant: c.Owner}, true
+		}
+	}
 	free := w.find(func(c Card) bool { return c.State == Down })
-	// [Start]
+	// [Start]: a free card
 	if t, m, ok := w.claim(); ok && free >= 0 {
 		w.cards[free] = Card{ID: w.cards[free].ID, State: Starting, Model: m, Owner: t}
-		return Action{Start, w.cards[free].ID, m, t}, true
+		return Action{Kind: Start, Card: w.cards[free].ID, Model: m, Tenant: t}, true
 	}
 	// [GiveWay]: the card that has been idle longest
 	if free < 0 && w.anyLost() {
@@ -169,15 +182,12 @@ func (w *world) rule() (Action, bool) {
 			return w.stop(i), true
 		}
 	}
-	if w.find(func(c Card) bool { return c.State == Draining }) >= 0 {
-		return Action{}, false // one card drains at a time, and no turn ends meanwhile
-	}
 	// [Pass]
 	for i, c := range w.cards {
 		if t, m, ok := w.winner(c); ok && t != c.Owner && m == c.Model {
 			w.lines.toBack(c.Owner)
 			w.cards[i].Owner, w.cards[i].TurnAt = t, w.now
-			return Action{Pass, c.ID, m, t}, true
+			return Action{Kind: Pass, Card: c.ID, Model: m, Tenant: t}, true
 		}
 	}
 	// [Drain]: from the owner with the most cards, the oldest turn first.
@@ -194,10 +204,12 @@ func (w *world) rule() (Action, bool) {
 	}
 	if best >= 0 && free < 0 {
 		c := w.cards[best]
-		w.cards[best].State = Draining
-		w.lines.Ended(c.Owner, c.Model)
-		return Action{Kind: Drain, Card: c.ID, Model: c.Model}, true
+		t, m, _ := w.winner(c)
+		w.lines.Ended(c.Owner, c.Model) // the old turn is over; the new one is the winner's
+		w.cards[best].State, w.cards[best].Owner, w.cards[best].Next = Draining, t, m
+		return Action{Kind: Drain, Card: c.ID, Model: c.Model, Tenant: t, For: m}, true
 	}
+
 	return Action{}, false
 }
 
@@ -351,11 +363,12 @@ func (w *world) queued(t, m string) int {
 	return n
 }
 
-// held is how many cards have a turn of t's.
+// held is how many cards have a turn of t's: its model is loading or up
+// there, or the card drains (or has drained) for it.
 func (w *world) held(t string) int {
 	n := 0
 	for _, c := range w.cards {
-		if serving(c) && c.Owner == t {
+		if (serving(c) || c.Next != "") && c.Owner == t { // (a card that is serving has no Next)
 			n++
 		}
 	}
@@ -363,11 +376,17 @@ func (w *world) held(t string) int {
 }
 
 // room is how many more requests m's cards can take, and whether it is on
-// a card at all.
+// a card at all -- or will be: a card that drains for m counts as m's.
 func (w *world) room(m string) (n int, placed bool) {
 	for _, c := range w.cards {
-		if serving(c) && c.Model == m {
-			n, placed = n+w.slots[m]-c.Inflight, true
+		switch {
+		case serving(c):
+			if c.Model == m {
+				n, placed = n+w.slots[m]-c.Inflight, true
+			}
+		case c.Next == m && m != "":
+			n, placed = n+w.slots[m], true
+
 		}
 	}
 	return n, placed

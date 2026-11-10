@@ -33,6 +33,9 @@ structure Card (T M C : Type) where
   model : Option M := none
   /-- the tenant whose turn it is -/
   owner : Option T := none
+  /-- what it drains for, or has drained for: the model it loads next, for
+  `owner` (`none`: nothing) -/
+  next : Option M := none
   /-- requests being answered on it -/
   inflight : Nat := 0
   /-- when this turn began: the load finished, or the turn passed -/
@@ -81,6 +84,8 @@ structure Action (T M C : Type) where
   card : C
   model : Option M := none
   tenant : Option T := none
+  /-- `drain`: the model the card drains for -/
+  next : Option M := none
 
 /-- Everything a round sees: `Decide`'s arguments. A rule that applies
 changes the cards and the lines, and the next rule sees the change. -/
@@ -131,6 +136,13 @@ def Lines.join (l : Lines T M) (flows : List (Flow T M)) : Lines T M :=
 /-- The card has a model that is loading or up (not one that is leaving). -/
 def Card.serving (c : Card T M C) : Bool := c.st = .starting || c.st = .up
 
+/-- The card is somebody's: their model is loading or up there, or it
+drains (or has drained) for them. -/
+def Card.taken (c : Card T M C) : Bool := c.serving || c.next.isSome
+
+/-- The card has `m`, or will: it drains (or has drained) for it. -/
+def Card.has (c : Card T M C) (m : M) : Bool := if c.serving then c.model = some m else c.next = some m
+
 /-- How old a turn on `c` must be before somebody else can have the card. -/
 def Policy.quantum (p : Policy) (c : Card T M C) : Nat :=
   max p.maxTimeslice (p.loadRatio * c.load)
@@ -151,7 +163,7 @@ def World.work (w : World T M C) (m : M) : Nat :=
 
 /-- How many cards have a turn of `t`'s. -/
 def World.held (w : World T M C) (t : T) : Nat :=
-  (w.cards.filter fun c => c.serving && c.owner = some t).length
+  (w.cards.filter fun c => c.taken && c.owner = some t).length
 
 def World.heldBy (w : World T M C) (t : Option T) : Nat :=
   match t with
@@ -160,11 +172,16 @@ def World.heldBy (w : World T M C) (t : Option T) : Nat :=
 
 /-- `m` is on a card (loading or up). -/
 def World.placed (w : World T M C) (m : M) : Bool :=
-  w.cards.any fun c => c.serving && c.model = some m
+  w.cards.any fun c => c.has m
 
-/-- How many more requests `m`'s cards can take. -/
+/-- How many more requests `m`'s cards can take (a card that drains for
+`m` will take a card's worth). -/
 def World.room (w : World T M C) (m : M) : Nat :=
-  (w.cards.filter fun c => c.serving && c.model = some m).foldl (fun n c => n + (w.slots m - c.inflight)) 0
+  w.cards.foldl (fun n c =>
+    if c.serving then (if c.model = some m then n + (w.slots m - c.inflight) else n)
+    else if c.next = some m then n + w.slots m
+    else n) 0
+
 
 /-- `t`'s first model that has queued requests and is on no card. -/
 def World.lost (w : World T M C) (t : T) : Option M :=
@@ -250,12 +267,19 @@ def World.stop (w : World T M C) (i : Nat) (c : Card T M C) : Action T M C × Wo
 /-- The first rule that has something to do, and the world after it. -/
 def World.rule (w : World T M C) : Option (Action T M C × World T M C) :=
   let cards := w.cards.zipIdx.map fun p => (p.2, p.1)
-  -- [Drained] a draining card with nothing in flight stops
+  -- [Drained] a draining card with nothing in flight stops; it stays its next tenant's
   match cards.find? fun p => p.2.st = .draining && p.2.inflight = 0 with
   | some (i, c) =>
-    some ({ kind := .stop, card := c.id, model := c.model }, { w with cards := w.cards.set i { id := c.id } })
+    some ({ kind := .stop, card := c.id, model := c.model },
+          { w with cards := w.cards.set i { id := c.id, owner := c.owner, next := c.next } })
   | none =>
-  let free := cards.find? fun p => p.2.st = .down
+  -- [Start] a card that drained for somebody loads their model
+  match cards.find? fun p => p.2.st = .down && p.2.next.isSome with
+  | some (i, c) =>
+    some ({ kind := .start, card := c.id, model := c.next, tenant := c.owner },
+          { w with cards := w.cards.set i { id := c.id, st := .starting, model := c.next, owner := c.owner } })
+  | none =>
+  let free := cards.find? fun p => p.2.st = .down && p.2.next.isNone
   -- [Start] a free card goes to the first claim
   match w.claim, free with
   | some (t, m), some (i, c) =>
@@ -270,8 +294,6 @@ def World.rule (w : World T M C) : Option (Action T M C × World T M C) :=
   match (if w.pol.idle > 0 then w.longestIdle w.pol.idle else none) with
   | some (i, c) => some (w.stop i c)
   | none =>
-  -- one card drains at a time, and no turn ends meanwhile
-  if cards.any (fun p => p.2.st = .draining) then none else
   -- [Pass] the best claim wants the model that is there: the turn changes hands
   match cards.findSome? fun p =>
       match w.winner p.2 with
@@ -282,17 +304,21 @@ def World.rule (w : World T M C) : Option (Action T M C × World T M C) :=
           { w with cards := w.cards.set i { c with owner := some t, turnAt := w.now }
                    lines := w.lines.tenantToBack c.owner })
   | none =>
-  -- [Drain] it wants another model: from the owner with the most cards, the oldest turn first
-  let wanted := cards.filter fun p =>
+  -- [Drain] it wants another model: the old turn is over, and the card is the winner's from
+  -- now, for that model. From the owner with the most cards, the oldest turn first.
+  let wanted := cards.filterMap fun p =>
     match w.winner p.2 with
-    | some (_, m) => some m ≠ p.2.model
-    | none => false
-  match firstBest wanted (fun c b =>
-      w.heldBy c.owner > w.heldBy b.owner || (w.heldBy c.owner = w.heldBy b.owner && c.turnAt < b.turnAt)), free with
-  | some (i, c), none =>
-    some ({ kind := .drain, card := c.id, model := c.model },
-          { w with cards := w.cards.set i { c with st := .draining }, lines := w.lines.ended c.owner c.model })
+    | some (t, m) => if some m ≠ p.2.model then some (p.1, (p.2, t, m)) else none
+    | none => none
+  match firstBest wanted (fun x y =>
+      w.heldBy x.1.owner > w.heldBy y.1.owner ||
+        (w.heldBy x.1.owner = w.heldBy y.1.owner && x.1.turnAt < y.1.turnAt)), free with
+  | some (i, (c, t, m)), none =>
+    some ({ kind := .drain, card := c.id, model := c.model, tenant := some t, next := some m },
+          { w with cards := w.cards.set i { c with st := .draining, owner := some t, next := some m }
+                   lines := w.lines.ended c.owner c.model })
   | _, _ => none
+
 
 /-- Apply rules until none applies, at most `fuel` times. -/
 def World.run (w : World T M C) : Nat → List (Action T M C) × World T M C

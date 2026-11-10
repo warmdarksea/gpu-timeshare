@@ -240,7 +240,8 @@ first. Each round:
    the model took to load), the tenant with the best claim gets the card:
    fewest cards first, then the line, the owner last among equals. If it
    wants the model that is there, the turn *passes* and nothing is
-   swapped; otherwise the card drains (one card at a time).
+   swapped; otherwise the card drains for that tenant, and is theirs from
+   then on (any number of cards may drain at once).
 
 With nobody else to serve, a model keeps its card for as long as it has
 work. Everyone with requests for a model that is up is answered during
@@ -271,12 +272,10 @@ models, and check that one tick under the bound is violated.
 proofs. For any number of tenants, models and cards: no rule
 stops a card that is answering, no turn is cut short, and a
 round ends within three decisions a card, and when the scheduler decides
-nothing no card is free or idle that a waiting model could have. For one
-card: a waiting flow has its model started within *T*·*k* turns, in turns
-and in time, for any quantum, zero included. For any number of cards: at
+nothing no card is free or idle that a waiting model could have; and at
 most *T*·*k* turns begin that are the waiting tenant's own or begin while
-it holds no card. (Not proved: a bound in time on several cards; see
-doc/VERIFICATION.md §8.3.) `nix-build -A tests.lean` checks them and runs the Lean model
+it holds no card. (Not proved yet for the algorithm as it is now: the
+bound in time; see doc/VERIFICATION.md §8.3.) `nix-build -A tests.lean` checks them and runs the Lean model
 against 90,000 rounds of the Go code's own decisions.
 `TestNoStarvation` checks the same things against `Decide` itself in 200
 random worlds of up to three cards.

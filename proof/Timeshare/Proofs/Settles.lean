@@ -67,7 +67,9 @@ theorem CardStep.steps_lt {w : World T M C} {c c' : Card T M C} (h : CardStep w 
     c'.steps w.now < c.steps w.now := by
   cases h with
   | drained hdr _ => simp [Card.steps, hdr]
+  | reserved hdown => simp [Card.steps, hdown]
   | start _ _ hdown => simp [Card.steps, hdown]
+
   | stop d hidle =>
     have hup := (idleFor_spec hidle).1
     simp only [Card.steps, hup]

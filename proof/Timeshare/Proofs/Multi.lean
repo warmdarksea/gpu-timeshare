@@ -15,7 +15,7 @@ cards counted in. For a flow (tenant `t`, model `m`):
 No step raises it. A turn that begins while `t` holds no card lowers it,
 and so does every turn of `t`'s own (`rule_multi`, `mturns_bound`).
 -/
-import Timeshare.Proofs.Progress
+import Timeshare.Proofs.Winner
 
 namespace Timeshare
 
@@ -182,12 +182,31 @@ end parts
 omit [DecidableEq M] in
 /-- How many cards have a turn of `u`'s (`World.held`, of the cards alone). -/
 def heldIn (cards : List (Card T M C)) (u : T) : Nat :=
-  (cards.filter fun c => c.serving && c.owner = some u).length
+  (cards.filter fun c => c.taken && c.owner = some u).length
 
 omit [DecidableEq T] in
-/-- `y` is on a card (`World.placed`, of the cards alone). -/
+/-- `y` is on a card, or will be (`World.placed`, of the cards alone). -/
 def placedIn (cards : List (Card T M C)) (y : M) : Bool :=
-  cards.any fun c => c.serving && c.model = some y
+  cards.any fun c => c.has y
+
+omit [DecidableEq T] in
+/-- A card that is nobody's has no model, and none coming. -/
+theorem has_of_not_taken {c : Card T M C} (h : c.taken = false) (y : M) : c.has y = false := by
+  unfold Card.taken at h
+  simp only [Bool.or_eq_false_iff] at h
+  unfold Card.has
+  rw [h.1]
+  have : c.next = none := by
+    cases hn : c.next with
+    | none => rfl
+    | some z => rw [hn] at h; simp at h
+  simp [this]
+
+omit [DecidableEq T] in
+/-- A card that is loading or up has the model that is on it. -/
+theorem has_of_serving {c : Card T M C} (h : c.serving = true) (y : M) :
+    c.has y = Decidable.decide (c.model = some y) := by
+  simp [Card.has, h]
 
 omit [DecidableEq M] in
 theorem held_eq (w : World T M C) (u : T) : w.held u = heldIn w.cards u := rfl
@@ -198,13 +217,13 @@ theorem placed_eq (w : World T M C) (y : M) : w.placed y = placedIn w.cards y :=
 omit [DecidableEq M] in
 theorem heldIn_set {cards : List (Card T M C)} {i : Nat} {c : Card T M C} (c' : Card T M C) (u : T)
     (hi : cards[i]? = some c) :
-    heldIn (cards.set i c') u + (if (c.serving && Decidable.decide (c.owner = some u)) = true then 1 else 0) =
-      heldIn cards u + (if (c'.serving && Decidable.decide (c'.owner = some u)) = true then 1 else 0) :=
+    heldIn (cards.set i c') u + (if (c.taken && Decidable.decide (c.owner = some u)) = true then 1 else 0) =
+      heldIn cards u + (if (c'.taken && Decidable.decide (c'.owner = some u)) = true then 1 else 0) :=
   length_filter_set _ cards i c c' hi
 
 omit [DecidableEq M] in
 theorem heldIn_pos {cards : List (Card T M C)} {c : Card T M C} {u : T} (hc : c ∈ cards)
-    (hs : c.serving = true) (ho : c.owner = some u) : 0 < heldIn cards u := by
+    (hs : c.taken = true) (ho : c.owner = some u) : 0 < heldIn cards u := by
   unfold heldIn
   apply List.length_pos_of_mem (a := c)
   exact List.mem_filter.mpr ⟨hc, by simp [hs, ho]⟩
@@ -244,8 +263,8 @@ structure MWaiting (cards : List (Card T M C)) (l : Lines T M) : Prop where
   tenant : t ∈ l.tenants
   model : m ∈ l.models t
   few : l.tenants.length ≤ N
-  /-- no card has `m` -/
-  away : ∀ c ∈ cards, c.serving = true → c.model ≠ some m
+  /-- no card has `m`, or drains for it -/
+  away : ∀ c ∈ cards, c.has m = false
 
 /-- The measure, for any number of cards. -/
 def mPot (cards : List (Card T M C)) (l : Lines T M) : Nat :=
@@ -253,23 +272,25 @@ def mPot (cards : List (Card T M C)) (l : Lines T M) : Nat :=
 
 omit [DecidableEq T] in
 theorem not_placed_of_away {cards : List (Card T M C)}
-    (h : ∀ c ∈ cards, c.serving = true → c.model ≠ some m) : placedIn cards m = false := by
+    (h : ∀ c ∈ cards, c.has m = false) : placedIn cards m = false := by
   unfold placedIn
   rw [List.any_eq_false]
   intro c hc
-  by_cases hs : c.serving = true
-  · simp [hs, h c hc hs]
-  · simp [hs]
+  simp [h c hc]
 
 /-- **A turn ends** on card `i` (a drain, an idle stop, a failure): the
 flow still waits, and the measure is no higher. -/
 theorem mpot_ended {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c : Card T M C} (c' : Card T M C)
     (hw : MWaiting N t m cards l) (hi : cards[i]? = some c) (hs : c.serving = true)
-    (hs' : c'.serving = false) :
+    (hs' : c'.taken = false) :
     MWaiting N t m (cards.set i c') (l.ended c.owner c.model) ∧
       mPot N t m (cards.set i c') (l.ended c.owner c.model) ≤ mPot N t m cards l := by
   have hcmem : c ∈ cards := List.mem_of_getElem? hi
-  have hxm : c.model ≠ some m := hw.away c hcmem hs
+  have htk : c.taken = true := by simp [Card.taken, hs]
+  have hxm : c.model ≠ some m := by
+    have := hw.away c hcmem
+    rw [has_of_serving hs] at this
+    simpa using this
   have hten : t ∈ (l.ended c.owner c.model).tenants := by
     cases ho : c.owner with
     | none => simpa using hw.tenant
@@ -287,11 +308,10 @@ theorem mpot_ended {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c : Ca
         | some y => simpa using hw.model
       few := hfew
       away := by
-        intro d hd hds
+        intro d hd
         rcases List.mem_or_eq_of_mem_set hd with h1 | h1
-        · exact hw.away d h1 hds
-        · rw [h1, hs'] at hds
-          cases hds }
+        · exact hw.away d h1
+        · rw [h1]; exact has_of_not_taken hs' m }
   refine ⟨hw', ?_⟩
   -- `t`'s models before `m`
   have ha : aPart m ((l.ended c.owner c.model).models t) (placedIn (cards.set i c')) ≤
@@ -302,7 +322,7 @@ theorem mpot_ended {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c : Ca
       by_contra hpl
       have hpl' : placedIn cards y = true := by simpa using hpl
       have : placedIn (cards.set i c') y = true :=
-        any_of_set _ cards i c c' hi (by simp [hmod]) hpl'
+        any_of_set _ cards i c c' hi (by rw [has_of_serving hs]; simp [hmod]) hpl'
       rw [hp] at this
       cases this
     | some x =>
@@ -315,7 +335,7 @@ theorem mpot_ended {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c : Ca
       by_contra hpl
       have hpl' : placedIn cards y = true := by simpa using hpl
       have : placedIn (cards.set i c') y = true :=
-        any_of_set _ cards i c c' hi (by simp [hmod, Ne.symm hyx]) hpl'
+        any_of_set _ cards i c c' hi (by rw [has_of_serving hs]; simp [hmod, Ne.symm hyx]) hpl'
       rw [hp] at this
       cases this
   -- the tenants before `t`
@@ -324,13 +344,14 @@ theorem mpot_ended {cards : List (Card T M C)} {l : Lines T M} {i : Nat} {c : Ca
     by_cases h0 : heldIn cards t = 0
     · have hot : c.owner ≠ some t := by
         intro ho
-        have := heldIn_pos hcmem hs ho
+        have := heldIn_pos hcmem htk ho
         omega
       have hheld : ∀ w, c.owner ≠ some w → heldIn (cards.set i c') w = heldIn cards w := by
         intro w hne
         have := heldIn_set c' w hi
-        simp only [hs, hs', hne, Bool.true_and, Bool.false_and, decide_false, Bool.false_eq_true, ite_false] at this
+        simp only [htk, hs', hne, Bool.true_and, Bool.false_and, decide_false, Bool.false_eq_true, ite_false] at this
         omega
+
       cases ho : c.owner with
       | none =>
         rw [ho] at hten hfew
