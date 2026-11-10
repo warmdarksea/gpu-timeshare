@@ -106,7 +106,10 @@ pass again, so a round always ends (§8.2, §9).
 Each model has a number of slots per card (`concurrency`). When a slot is
 free on a card whose model is up:
 
-- it goes to the tenant with the fewest requests in flight for that model;
+- it goes to the tenant whose turn it is on the card (the owner), while
+  that tenant holds fewer than half the card's slots and has a request to
+  give: **the owner's half**;
+- otherwise to the tenant with the fewest requests in flight for that model;
 - among equals, to the tenant after the one served last;
 - within a tenant, to its oldest request, single requests before batch
   lines (a client holds a connection open for a single request);
@@ -227,14 +230,17 @@ what `max_timeslice` buys and costs; §4.3 is the other side.
 Once the model is up, a request waits for a slot.
 
 > A tenant with a queued request for a model that is up, and none in
-> flight, gets one of the
-> next *n* slots that come free on that model's cards, or the model
-> drains first (and §4.1 applies again).
+> flight, gets one of the next *n* + *h* slots that come free on that
+> model's cards (*n* the tenants with requests for it, *h* half a card's
+> slots), or the model drains first (and §4.1 applies again).
 
-A free slot goes to the tenant with the fewest requests in flight. A
-tenant with none in flight is ahead of every tenant with one, and among
-tenants with none the order is round-robin, so at most *n* − 1 others are
-served first. A slot comes free within *R*.
+A free slot goes to the owner of the turn while it holds fewer than half
+the card's slots (at most *h* slots), and otherwise to the tenant with
+the fewest requests in flight. A tenant with none in flight is ahead of
+every tenant with one, and among tenants with none the order is
+round-robin, so at most *n* − 1 others are served first. A slot comes free
+within *R*. The rule for each slot is proved (§8.2, `step_owner`,
+`step_fewest`, `step_waiting`); the count *n* + *h* is read off it.
 
 A request that is not its tenant's oldest waits for its tenant's older
 requests too. That is the tenant's own queue, and no bound on it is
@@ -264,24 +270,55 @@ Swaps that are never made:
 - cards that are split evenly stay as they are: a copy does not take a
   card it would have to give back (`TestCardsShareEvenly`).
 
-### 4.4 Fair shares
+### 4.4 Latency and fairness, defined
 
-When every tenant always has work:
+**Latency** is how long until your work begins to be done. Two of them:
 
-- each tenant has the same number of turns, whatever it spreads them
-  over. Alice and Bob on one model and Carol on another: two thirds of
-  the time for the shared model. Alice on four models and Bob on one:
-  half the time for Bob's (`TestTenantsShareEvenly`,
-  `TestSpreadingBuysNothing`);
-- the cards are divided between the tenants that have work for them to
-  within one card (`TestCardsShareEvenly`).
+- *Flow latency*: from when tenant *t* has a request queued for model *m*
+  until one of those requests is being answered.
+- *Tenant latency*: from when *t* has requests queued and none being
+  answered until any one of them is.
 
-What is equal is turns, not GPU-seconds. A tenant is also answered during
-other tenants' turns on a model it shares, so sharing a model is rewarded.
-That is deliberate: it is the behaviour that needs no swap.
+Each is two waits: for the model to be up, and then for a slot.
 
-These are tested against the Go code in simulation. They are not in the
-TLA+ model.
+| | until the model is up | then, until a slot |
+|---|---|---|
+| a flow | *T*·*k* turns + *D* + *L* (§4.1; proved) | one of the next *n* + *h* slots that come free (§4.2; proved) |
+| a tenant | ***T* turns** + *D* + *L* (proved) | the same |
+
+A turn is at most *D* + *L* + *Q*; *n* is the tenants with requests for
+the model and *h* half a card's slots. The tenant's bound has no *k* and
+no number of models in it: turns belong to tenants, so with *T* tenants
+somebody's job of yours is on its way within *T* turns, however many
+models there are. The wait for a slot has no quantum in it: on a model
+that is up, a request waits for single requests to end, never for a turn.
+
+**Fairness** is three statements, each stronger than the last:
+
+1. *Nobody is overtaken twice round.* While you hold no card, every turn
+   that begins goes to you or to a tenant that stood before you in the
+   line and held none either; so fewer than *T* turns begin before yours
+   (proved, in turns and in time).
+2. *Spreading and queueing buy nothing.* Turns are a tenant's, not a
+   model's or a request's: a tenant with work on four models and a tenant
+   with work on one have the same number of turns, and so do a tenant
+   with ten requests and one with ten thousand (tested:
+   `TestSpreadingBuysNothing`, `TestTenantsShareEvenly`; the proofs above
+   never count models or requests of *other* tenants).
+3. *A share of the card.* During its own turn a tenant with requests to
+   give holds at least half the card's slots (**the owner's half**,
+   proved for each free slot); and the cards are divided between the
+   tenants that have work for them to within one card (tested:
+   `TestCardsShareEvenly`). With equal turns, that is at least about
+   1/(2·*T*) of the card's time for each tenant with work, less the
+   swaps. That last figure is arithmetic on the two statements before
+   it; it is not itself a theorem.
+
+What is *not* claimed: equal GPU-seconds. A tenant is also answered
+during other tenants' turns on a model it shares (it "rides"), and that
+is deliberate: it needs no swap, and it is what keeps latency on a model
+that is up down to single requests. The owner's half is the limit on it.
+Before that rule there was none (§9, entry 18).
 
 ### 4.5 No waste, and rounds end
 
@@ -640,6 +677,28 @@ while it holds none. Then:
 This is the theorem the reserved drains were for (§9, entry 17): with one
 drain at a time it was false.
 
+**Tenant latency, and nobody overtaken twice round** (`tenant_wait_bound`
+in `Proofs/MultiWait.lean`, `tenant_turns_bound` in `MultiBound.lean`).
+For the flow that is first in its tenant's line -- the one of its flows
+that has waited longest:
+
+> fewer than *N* charged turns begin before its own, and at most
+> ***N*·(*D* + *L* + *Q*) ticks** go by before its model is started or a
+> card begins to drain for it.
+
+One turn for each tenant with queued requests, however many models there
+are: §4.4's tenant latency, and its first statement of fairness.
+
+**The slots of a model that is up** (`Proofs/Slots.lean`). `roundRobin` in
+`Policy.lean` is `RoundRobin` in `policy.go`, checked against it on 20,000
+random calls (§8.1). For each free slot (`Picking.step`):
+
+| Theorem | Says |
+|---|---|
+| `step_owner` | **The owner's half.** While the tenant whose turn it is has a request to give and holds fewer than half the card's slots, the slot is its. |
+| `step_fewest` | Otherwise the slot goes to a tenant with a request to give and no more in flight than anybody else who has one. |
+| `step_waiting` | So a tenant with a request to give and none in flight is not passed over, the owner's half aside, for anybody who has one in flight. |
+
 **The last step** (`Proofs/MultiUp.lean`).
 
 > **`up_bound`.** Once a card has a model coming -- it drains for it, has
@@ -660,7 +719,13 @@ The build fails on an unfinished proof (`assert_no_sorry`), and
 **1. The cap *T*·(*M* − 1)** of §4.1. *T*·*k* is proved; the cap is TLC's
 finding at small sizes.
 
-**2. Fair shares** (§4.4): tested in simulation, not proved.
+**2. Shares of the card over time** (§4.4, third statement). What is
+proved is the owner's half, slot by slot. That turns are equal in number
+over a long run, that cards are divided to within one, and the figure
+1/(2·*T*) that follows from them are tested or argued, not proved. (In
+the `lean` build the scheduler is the Lean model, but `RoundRobin` is
+still Go's: the Lean `roundRobin` is proved about and tested against it,
+not linked in.)
 
 **3. That the Lean model and the Go code agree.** That is a test (§8.1).
 In the `lean` build it does not need to be true: the Lean model decides
@@ -883,7 +948,27 @@ loaded for a claim even if that claim's requests went away during the
 drain.
 
 
+**18. A tenant could take half of everybody else's turns.** *State:*
+`452e570` (reserved drains, `mwait_bound` and the `lean` build done; free
+slots went to the tenant with the fewest requests in flight, whoever's
+turn it was). *Defect:* a design one, found by asking what "a fair share"
+should mean. Alice has work on models A and B, Bob on A only, one card.
+Bob's turn loads A, where Alice has requests too and gets half the slots;
+Alice's turn always goes to B (a tenant moves to a model of its own that
+is on no card), where she is alone. Turns are equal, and Alice has about
+three quarters of the card: a second model queued anywhere buys half of
+every turn on a model one shares. *How found:* by hand, from the rules;
+no test measured GPU time by tenant. *Fix:* the owner's half. A free slot
+goes first to the tenant whose turn it is, while it holds fewer than half
+the card's slots and has a request to give (`Owner` in `RoundRobin`;
+`Picking.owners` in the Lean model; `step_owner`). Riders still get the
+next slot after that, so latency on a model that is up stays a matter of
+single requests; on a model with one slot the card is the owner's.
+(Giving the owner every slot was the other fix considered; it would have
+made a rider wait a whole turn, and was rejected for that.)
+
 ## 10. When you change the algorithm
+
 
 Change `policy.go`, `spec/Turns.tla`, `proof/Timeshare/Policy.lean` and §2
 here together, rule for rule. Then run `go test ./internal/sched/`,

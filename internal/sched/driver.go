@@ -36,7 +36,7 @@ type Scheduler struct {
 	once    sync.Once
 }
 
-type run struct{ batch, key, client, model string }
+type run struct{ batch, key, client, model, card string }
 
 // card is one GPU and what is on it.
 type card struct {
@@ -394,12 +394,19 @@ func (s *Scheduler) dispatch(ctx context.Context, c *card) error {
 		}
 		byClient[cl] = keep
 	}
-	picked, last := RoundRobin(byClient, func(r queue.Request) string { return r.Key }, inflight, s.cursor[name], free)
+	own := Owner{Tenant: c.owner, Slots: c.model.Concurrency}
+	for _, r := range s.running {
+		if r.card == c.id && r.client == c.owner {
+			own.Held++
+		}
+	}
+	picked, last := RoundRobin(byClient, func(r queue.Request) string { return r.Key }, inflight, own, s.cursor[name], free)
 	if last != "" {
 		s.cursor[name] = last
 	}
 	for _, r := range picked {
-		s.running[r.ID] = run{batch: r.BatchID, key: r.Key, client: r.Client, model: name}
+		s.running[r.ID] = run{batch: r.BatchID, key: r.Key, client: r.Client, model: name, card: c.id}
+
 		s.keys[r.Key] = true
 		c.inflight++
 		go s.execute(ctx, c, c.server, r)

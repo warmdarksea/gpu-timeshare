@@ -105,4 +105,44 @@ def decideText (input : String) : String :=
     String.join (acts.map fun a => "act " ++ a ++ "\n") ++
       String.join (out.map fun p => "out " ++ " ".intercalate (p.1 :: p.2) ++ "\n")
 
+/-- A call of `RoundRobin`, and what Go picked:
+
+    rr AFTER N OWNER HELD SLOTS
+    rt TENANT INFLIGHT ID:KEY...     each tenant's requests, the tenants in order
+    rp ID                            the picks, in order
+    rl LAST
+-/
+structure RRCase where
+  active : Bool := false
+  after : Option String := none
+  n : Nat := 0
+  own : Owner String := {}
+  tenants : List (String × Nat × List (String × String)) := []
+  picks : List String := []
+  last : Option String := none
+
+def RRCase.add (c : RRCase) (ws : List String) : Except String RRCase :=
+  match ws with
+  | ["rr", after, n, o, held, slots] =>
+    pure { c with active := true, after := opt after, n := n.toNat!,
+                  own := { tenant := opt o, held := held.toNat!, slots := slots.toNat! } }
+  | "rt" :: t :: infl :: rs =>
+    let reqs := rs.map fun r => match r.splitOn ":" with
+      | [id, k] => (id, k)
+      | _ => (r, r)
+    pure { c with tenants := c.tenants ++ [(t, infl.toNat!, reqs)] }
+  | ["rp", id] => pure { c with picks := c.picks ++ [id] }
+  | ["rl", last] => pure { c with last := opt last }
+  | _ => throw ("can't read: " ++ " ".intercalate ws)
+
+/-- What the model picks: the requests' ids, and the tenant served last. -/
+def RRCase.run (c : RRCase) : List String × Option String :=
+  let inflight (t : String) : Nat := match c.tenants.find? (·.1 = t) with
+    | some p => p.2.1
+    | none => 0
+  let (picked, last) := roundRobin (c.tenants.map fun p => (p.1, p.2.2)) (fun r : String × String => r.2)
+    (fun a b => a ≤ b) inflight c.own c.after c.n
+  (picked.map (·.1), last)
+
 end Timeshare.Text
+

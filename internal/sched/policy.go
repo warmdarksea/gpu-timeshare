@@ -437,6 +437,13 @@ func (w *world) longestIdle(d time.Duration) int {
 
 // ---- the requests of a model that is up --------------------------------------
 
+// Owner is the tenant whose turn it is on a card, for RoundRobin: how many
+// of the card's Slots its requests hold now.
+type Owner struct {
+	Tenant      string
+	Held, Slots int
+}
+
 // RoundRobin picks up to n of a model's queued requests for its free
 // slots. Each goes to the tenant with the fewest requests in flight (so
 // the slots are shared evenly, however long each tenant's requests run),
@@ -445,7 +452,14 @@ func (w *world) longestIdle(d time.Duration) int {
 // same question is asked once). It returns the picks and the tenant
 // served last. So a tenant with a queued request for a model that is up
 // waits for at most one request of each other tenant.
-func RoundRobin[R any](byTenant map[string][]R, key func(R) string, inflight map[string]int, after string, n int) ([]R, string) {
+//
+// One exception, for the tenant whose turn it is on the card (own): while
+// it holds fewer than half the card's slots and has a request to give, the
+// free slot is its. Everybody with requests for the model is answered
+// during a turn, and at once -- but the turn's owner keeps half of it,
+// whoever else rides. (Without this a tenant could take its own turns on
+// one model and half of everybody else's on another.)
+func RoundRobin[R any](byTenant map[string][]R, key func(R) string, inflight map[string]int, own Owner, after string, n int) ([]R, string) {
 	var tenants []string
 	for t, rs := range byTenant {
 		if len(rs) > 0 {
@@ -473,6 +487,9 @@ func RoundRobin[R any](byTenant map[string][]R, key func(R) string, inflight map
 		}
 		if best == "" {
 			break
+		}
+		if o := own.Tenant; o != "" && next[o] < len(byTenant[o]) && own.Held+got[o] < (own.Slots+1)/2 {
+			best = o // the owner's half
 		}
 		r := byTenant[best][next[best]]
 		keys[key(r)] = true

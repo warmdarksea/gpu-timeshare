@@ -16,7 +16,11 @@ import (
 // proof/Check.lean runs the model on each and compares. `nix-build -A
 // tests.lean` does both. The format is in Check.lean.
 
+// a request, for the calls of RoundRobin TestCases writes
+type caseReq struct{ id, key string }
+
 func minutes(t time.Time) int {
+
 	if t.IsZero() {
 		return 0
 	}
@@ -87,6 +91,42 @@ func TestCases(t *testing.T) {
 			}
 			s.step(false)
 		}
+	}
+	// and calls of RoundRobin, at random: tenants, requests (some sharing a
+	// key), who has how many in flight, whose turn it is
+	rng := rand.New(rand.NewSource(7))
+	for call := 0; call < 20000; call++ {
+		names := []string{"alice", "bob", "carol", "dave", "erin"}[:1+rng.Intn(5)]
+		by, inflight := map[string][]caseReq{}, map[string]int{}
+		id := 0
+		for _, t := range names {
+			for k := rng.Intn(5); k > 0; k-- {
+				id++
+				by[t] = append(by[t], caseReq{fmt.Sprint("r", id), fmt.Sprint("k", rng.Intn(8))})
+			}
+			inflight[t] = rng.Intn(4)
+		}
+		pickName := func() string {
+			if rng.Intn(3) == 0 {
+				return ""
+			}
+			return []string{"alice", "bob", "carol", "dave", "erin", "zed"}[rng.Intn(6)]
+		}
+		own := Owner{Tenant: pickName(), Held: rng.Intn(3), Slots: 1 + rng.Intn(6)}
+		after, n := pickName(), rng.Intn(7)
+		picked, last := RoundRobin(by, func(r caseReq) string { return r.key }, inflight, own, after, n)
+		fmt.Fprintf(out, "rr %s %d %s %d %d\n", dash(after), n, dash(own.Tenant), own.Held, own.Slots)
+		for _, t := range names {
+			fmt.Fprintf(out, "rt %s %d", t, inflight[t])
+			for _, r := range by[t] {
+				fmt.Fprintf(out, " %s:%s", r.id, r.key)
+			}
+			fmt.Fprintln(out)
+		}
+		for _, r := range picked {
+			fmt.Fprintf(out, "rp %s\n", r.id)
+		}
+		fmt.Fprintf(out, "rl %s\nend\n", dash(last))
 	}
 	if err := out.Flush(); err != nil {
 		t.Fatal(err)

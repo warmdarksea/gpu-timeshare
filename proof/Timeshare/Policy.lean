@@ -341,4 +341,95 @@ def decide (cards : List (Card T M C)) (flows : List (Flow T M)) (slots : M → 
   let (as, w') := w.run (3 * cards.length + 1)
   (as, w'.lines)
 
+/-! ## The requests of a model that is up -/
+
+/-- The tenant whose turn it is on a card, for `roundRobin`: how many of
+the card's `slots` its requests hold now. -/
+structure Owner (T : Type) where
+  tenant : Option T := none
+  held : Nat := 0
+  slots : Nat := 0
+
+/-- `roundRobin` as it goes: each tenant's requests not yet picked (the
+tenants in their order), the keys picked, who got a pick (once for each),
+the tenant served last, and the picks. -/
+structure Picking (T R K : Type) where
+  rest : List (T × List R)
+  keys : List K := []
+  got : List T := []
+  after : Option T := none
+  picked : List R := []
+
+section roundRobin
+variable {R K : Type} [DecidableEq K]
+
+/-- Each tenant's requests with those whose key is picked already dropped
+from the front. -/
+def Picking.live (key : R → K) (s : Picking T R K) : List (T × List R) :=
+  s.rest.map fun p => (p.1, p.2.dropWhile fun r => key r ∈ s.keys)
+
+/-- How many requests tenant `t` has in flight, counting the picks so far. -/
+def Picking.load (inflight : T → Nat) (s : Picking T R K) (t : T) : Nat := inflight t + s.got.count t
+
+/-- The tenant with the fewest requests in flight among those with a
+request to give, and among those the next after the tenant served last
+(`le` is the tenants' order, in which `rest` is sorted). -/
+def Picking.fewest (key : R → K) (le : T → T → Bool) (inflight : T → Nat) (s : Picking T R K) :
+    Option (T × List R) :=
+  let live := s.live key
+  let start := match s.after with
+    | none => 0
+    | some a => (live.filter fun p => le p.1 a).length
+  (live.drop start ++ live.take start).foldl (fun best p =>
+    if p.2.isEmpty then best else
+    match best with
+    | none => some p
+    | some b => if s.load inflight p.1 < s.load inflight b.1 then some p else some b) none
+
+/-- The owner of the card, if it has a request to give and holds fewer
+than half the slots. -/
+def Picking.owners (key : R → K) (own : Owner T) (s : Picking T R K) : Option (T × List R) :=
+  match own.tenant with
+  | none => none
+  | some o =>
+    match (s.live key).find? fun p => p.1 = o with
+    | some p => if !p.2.isEmpty ∧ own.held + s.got.count o < (own.slots + 1) / 2 then some p else none
+    | none => none
+
+/-- One pick: the owner's half first, else the tenant with the fewest in
+flight. -/
+def Picking.step (key : R → K) (le : T → T → Bool) (inflight : T → Nat) (own : Owner T) (s : Picking T R K) :
+    Option (Picking T R K) :=
+  match s.fewest key le inflight with
+  | none => none
+  | some b =>
+    let p := (s.owners key own).getD b
+    match p.2 with
+    | [] => none
+    | r :: rs =>
+      some { rest := (s.live key).map fun q => if q.1 = p.1 then (q.1, rs) else q
+             keys := key r :: s.keys
+             got := p.1 :: s.got
+             after := some p.1
+             picked := s.picked ++ [r] }
+
+def Picking.run (key : R → K) (le : T → T → Bool) (inflight : T → Nat) (own : Owner T) :
+    Nat → Picking T R K → Picking T R K
+  | 0, s => s
+  | n + 1, s =>
+    match s.step key le inflight own with
+    | none => s
+    | some s' => Picking.run key le inflight own n s'
+
+/-- Up to `n` of a model's queued requests for its free slots, and the
+tenant served last: `RoundRobin` in policy.go. `byTenant` is each tenant's
+requests, the tenants in their order `le`. -/
+def roundRobin (byTenant : List (T × List R)) (key : R → K) (le : T → T → Bool) (inflight : T → Nat)
+    (own : Owner T) (after : Option T) (n : Nat) : List R × Option T :=
+  let s := Picking.run key le inflight own n { rest := byTenant.filter (fun p => !p.2.isEmpty), after := after }
+  (s.picked, if s.picked.isEmpty then none else s.after)
+
+end roundRobin
+
 end Timeshare
+

@@ -343,15 +343,11 @@ inductive TTrace : TSys T M C → TSys T M C → Prop
   | nil (s : TSys T M C) : TTrace s s
   | step {s s1 s2 : TSys T M C} : TTrace s s1 → TStep N t m pol L D s1 s2 → TTrace s s2
 
-/-- **No starvation, on any number of cards, in time.** While tenant `t`
-has requests queued for model `m`, and until `m` is started or a card
-begins to drain for it, at most `K * N * (D + L + Q)` ticks go by: whatever
-else is queued, by whomever, whenever; whatever the model servers do
-within their limits; on however many cards. -/
-theorem mwait_bound {s s' : TSys T M C} {K : Nat} (h : TTrace N t m pol L D s s')
+/-- The wait, in terms of the measure when it begins. -/
+theorem mwait_pot {s s' : TSys T M C} (h : TTrace N t m pol L D s s')
     (hw : MWaiting N t m s.sys.cards s.sys.lines) (hne : s.sys.cards ≠ [])
-    (hok : ∀ c ∈ s.sys.cards, CardOK L s.now c) (hK : (s.sys.lines.models t).length ≤ K) :
-    s'.now ≤ s.now + K * N * turn1 pol L D := by
+    (hok : ∀ c ∈ s.sys.cards, CardOK L s.now c) :
+    s'.now ≤ s.now + mPot N t m s.sys.cards s.sys.lines * turn1 pol L D + turn1 pol L D := by
   have hinv0 : TInv N t m pol L D
       (s.now + mPot N t m s.sys.cards s.sys.lines * turn1 pol L D + turn1 pol L D) s := by
     refine ⟨hw, hok, fun _ c _ _ => ?_, fun _ => ?_⟩
@@ -367,6 +363,18 @@ theorem mwait_bound {s s' : TSys T M C} {K : Nat} (h : TTrace N t m pol L D s s'
     | nil => exact hinv0
     | step _ hs ih => exact step_inv N t m pol L D ih hs
   have hbase := bud_base N t m pol L D hinv.bud
+  omega
+
+/-- **No starvation, on any number of cards, in time.** While tenant `t`
+has requests queued for model `m`, and until `m` is started or a card
+begins to drain for it, at most `K * N * (D + L + Q)` ticks go by: whatever
+else is queued, by whomever, whenever; whatever the model servers do
+within their limits; on however many cards. -/
+theorem mwait_bound {s s' : TSys T M C} {K : Nat} (h : TTrace N t m pol L D s s')
+    (hw : MWaiting N t m s.sys.cards s.sys.lines) (hne : s.sys.cards ≠ [])
+    (hok : ∀ c ∈ s.sys.cards, CardOK L s.now c) (hK : (s.sys.lines.models t).length ≤ K) :
+    s'.now ≤ s.now + K * N * turn1 pol L D := by
+  have hpot := mwait_pot N t m pol L D h hw hne hok
   have h2 := mPot_le N t m hw hK
   have hKN : 1 ≤ K * N := by
     have := List.length_pos_of_mem hw.tenant
@@ -380,10 +388,39 @@ theorem mwait_bound {s s' : TSys T M C} {K : Nat} (h : TTrace N t m pol L D s s'
     simp [Nat.add_mul]
   omega
 
+/-- **Tenant latency.** The flow that is first in its tenant's line -- the
+one of its flows that has waited longest -- waits at most `N * (D + L + Q)`
+ticks for its model to be started, or for a card to begin draining for it:
+one turn for each tenant with queued requests, however many models there
+are. So a tenant with queued requests has one of them on its way within
+`N` turns. -/
+theorem tenant_wait_bound {s s' : TSys T M C} (h : TTrace N t m pol L D s s')
+    (hw : MWaiting N t m s.sys.cards s.sys.lines) (hne : s.sys.cards ≠ [])
+    (hok : ∀ c ∈ s.sys.cards, CardOK L s.now c) (hhead : before (s.sys.lines.models t) m = []) :
+    s'.now ≤ s.now + N * turn1 pol L D := by
+  have hpot := mwait_pot N t m pol L D h hw hne hok
+  have ha : aPart m (s.sys.lines.models t) (placedIn s.sys.cards) = 0 := by simp [aPart, hhead]
+  have hp := pPart_le_max N t (heldIn s.sys.cards) hw.tenant hw.few
+  have hN : 1 ≤ N := by
+    have := List.length_pos_of_mem hw.tenant
+    have := hw.few
+    omega
+  have h4 := Nat.mul_le_mul_right (turn1 pol L D) hp
+  have h5 : (N - 1) * turn1 pol L D + turn1 pol L D = N * turn1 pol L D := by
+    obtain ⟨k, hk⟩ : ∃ k, N = k + 1 := ⟨N - 1, by omega⟩
+    rw [hk]
+    simp [Nat.add_mul]
+  unfold mPot at hpot
+  rw [ha] at hpot
+  simp only [Nat.zero_mul, Nat.zero_add] at hpot
+  omega
+
 end timed
+
 
 assert_no_sorry rule_bud
 assert_no_sorry step_inv
 assert_no_sorry mwait_bound
+assert_no_sorry tenant_wait_bound
 
 end Timeshare

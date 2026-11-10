@@ -457,9 +457,26 @@ theorem mturns_bound {s s' : MSys T M C} {n K : Nat} (h : MTrace N t m s n s')
   have h2 := mPot_le N t m hw hK
   omega
 
+/-- **Nobody is overtaken twice round.** For the flow that is first in its
+tenant's line: at most `N - 1` charged turns begin before its own -- fewer
+than one for each tenant with queued requests. While the tenant holds no
+card, every turn that begins goes to somebody who stood before it in the
+line and held none either, and nobody is that twice. -/
+theorem tenant_turns_bound {s s' : MSys T M C} {n : Nat} (h : MTrace N t m s n s')
+    (hw : MWaiting N t m s.cards s.lines) (hhead : before (s.lines.models t) m = []) : n ≤ N - 1 := by
+  have h1 := (mtrace_pot N t m h hw).2
+  have ha : aPart m (s.lines.models t) (placedIn s.cards) = 0 := by simp [aPart, hhead]
+  have hp := pPart_le_max N t (heldIn s.cards) hw.tenant hw.few
+  unfold mPot at h1
+  rw [ha] at h1
+  simp only [Nat.zero_mul, Nat.zero_add] at h1
+  omega
+
 end multi
 
+assert_no_sorry tenant_turns_bound
 assert_no_sorry mpot_ended
+
 assert_no_sorry mpot_start
 assert_no_sorry mpot_pass
 assert_no_sorry rule_multi
