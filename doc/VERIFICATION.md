@@ -966,6 +966,29 @@ single requests; on a model with one slot the card is the owner's.
 (Giving the owner every slot was the other fix considered; it would have
 made a rider wait a whole turn, and was rejected for that.)
 
+**19. With the Lean scheduler linked in, the service died at its first
+round on a small machine.** *State:* `943b5fe` plus the change that made
+the Lean build the only one (the driver calling `DecideLean` and
+`RoundRobinLean`; `libscheduler.a` from `lean -c`). The Go tests passed
+in the nix build, the Lean scheduler deciding in all of them. *Defect:*
+Lean's runtime starts a thread when it is initialized, and gives it a
+stack of 1 GB (mapped without MAP_NORESERVE). The VM of
+`tests.nixos` has 1 GB of memory: the kernel refused the mapping,
+`pthread_create` answered EAGAIN, Lean threw (`failed to create thread:
+Resource temporarily unavailable`), and the process aborted inside
+`ts_init`, at the scheduler's first round, a few milliseconds after
+logging that it was serving. systemd restarted it every ten seconds, to
+the same end. *How found:* `nix-build -A tests.nixos`, the first time it
+ran with the Lean scheduler (the old `lean` build was never put in the
+VM): the SDK client got "connection refused". On a machine with memory to
+spare it does not show, which is why no Go test saw it. *Fix:* `ts_init`
+calls `lean_internal_set_thread_stack_size` with 8 MB before it
+initializes the runtime. (A first fix, `setenv("LEAN_STACK_SIZE_KB")`
+there, changed nothing, and the VM test said so: the stack was still
+1 GB under strace.) None of the scheduler runs on
+that thread: every call is made on the Go thread `lean.go` locks. The VM
+test is what checks it.
+
 ## 10. When you change the algorithm
 
 Change `policy.go`, `spec/Turns.tla`, `proof/Timeshare/Policy.lean` and §2

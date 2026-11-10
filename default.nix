@@ -78,6 +78,9 @@ let
         subPackages = [ "cmd/gpu-timeshare-stub" ];
         doCheck = false;
         doInstallCheck = false;
+        # no scheduler in it: no cgo, nothing of Lean's to find at run time
+        env = old.env // { CGO_ENABLED = "0"; CGO_CFLAGS = ""; CGO_LDFLAGS = ""; };
+        buildInputs = [ ];
         meta = old.meta // { mainProgram = "gpu-timeshare-stub"; };
       });
       # bin/sandbox-report, with its interpreter: what a process can reach

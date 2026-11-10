@@ -22,13 +22,18 @@ package sched
 #include <lean/lean.h>
 
 extern void lean_initialize_runtime_module();
+extern void lean_internal_set_thread_stack_size(size_t);
 extern void lean_io_mark_end_initialization();
 extern lean_object* initialize_Timeshare_Text(uint8_t builtin);
 extern lean_object* timeshare_decide(lean_object*);
 extern lean_object* timeshare_roundrobin(lean_object*);
 
-
 static int ts_init(void) {
+	// Lean gives the thread it starts here a stack of 1 GB unless told
+	// otherwise; none of the scheduler runs on it. A machine with less
+	// memory than that refuses ("failed to create thread") and the program
+	// dies.
+	lean_internal_set_thread_stack_size((size_t)8 << 20);
 	lean_initialize_runtime_module();
 	lean_object* r = initialize_Timeshare_Text(1);
 	int ok = lean_io_result_is_ok(r);
