@@ -1,0 +1,324 @@
+/-
+No starvation, on any number of cards, counted in turns: `mturns_bound`.
+
+While tenant `t` has requests queued for model `m`, and until `m` is
+started, call a turn *charged* if it begins while `t` holds no card
+(whoever it goes to), or is `t`'s own. At most `K * N - 1` charged turns
+begin -- `N` the most tenants with queued requests at a time, `K` the
+number of `t`'s models with queued requests when the wait begins.
+
+In words: while `t` holds no card, every card the scheduler hands out goes
+to `t` or to a tenant that stood before `t` in the line and held none
+either, and there are fewer than `N` of those; and every turn of `t`'s own
+starts a model that stood before `m` in its line, or `m`, and there are
+fewer than `K` of those.
+
+What this does not bound is how long `t` can hold a card on another model
+while `m` waits: turns that begin for others during that time are not
+charged. On one card that time is one turn (Timed.lean).
+
+The system is the cards and the lines (`MSys`); a history (`MTrace`) is
+rounds of `decide` on all the cards, and between them whatever the model
+servers do, each on its own card.
+-/
+import Timeshare.Proofs.MultiRule
+
+namespace Timeshare
+
+variable {T M C : Type} [DecidableEq T] [DecidableEq M]
+
+section multi
+variable (N : Nat) (t : T) (m : M)
+
+/-- A turn begins that is `t`'s own, or begins while `t` holds no card. -/
+def charged (w : World T M C) (a : Action T M C) : Nat :=
+  if (a.kind = .start ∨ a.kind = .pass) ∧ (w.held t = 0 ∨ a.tenant = some t) then 1 else 0
+
+/-- **One rule, on any number of cards**, while the flow waits and `m` is
+not started: the flow still waits, and the measure is no higher -- one
+lower if a charged turn began. -/
+theorem rule_multi {w w' : World T M C} {a : Action T M C} (hw : MWaiting N t m w.cards w.lines)
+    (h : w.rule = some (a, w')) (hno : a.kind = .start → a.model ≠ some m) :
+    MWaiting N t m w'.cards w'.lines ∧
+      mPot N t m w'.cards w'.lines + charged t w a ≤ mPot N t m w.cards w.lines := by
+  have hlostm : w.placed m = false := not_placed_of_away m hw.away
+  have hlost : (w.lost t).isSome = true := by
+    unfold World.lost
+    rw [List.find?_isSome]
+    exact ⟨m, hw.model, by simp [hlostm]⟩
+  cases rule_effect h with
+  | drained i d hd hst _ =>
+    have hs : d.serving = false := by simp [Card.serving, hst]
+    obtain ⟨hw', he⟩ := mpot_congr N t m { id := d.id } hw hd (by rw [hs]; rfl)
+      (by intro h1; rw [hs] at h1; cases h1)
+    exact ⟨hw', by simp [charged, he]⟩
+  | start i d u x hd hst hclaim =>
+    have hs : d.serving = false := by simp [Card.serving, hst]
+    have hxm : x ≠ m := fun hx => hno rfl (by rw [hx])
+    obtain ⟨hw', hA, hB, hC⟩ := mpot_start N t m
+      (c' := { id := d.id, st := .starting, model := some x, owner := some u }) hw hd hs rfl rfl rfl hxm
+    refine ⟨hw', ?_⟩
+    unfold World.claim at hclaim
+    by_cases hut : u = t
+    · subst hut
+      -- `t`'s own turn: it starts its first lost model, which stood before `m`
+      obtain ⟨x', hx'⟩ := Option.isSome_iff_exists.mp hlost
+      have hpick := (firstLowest_some hclaim).2
+      simp only [hx', Option.orElse_some, Option.some.injEq] at hpick
+      subst hpick
+      have hx0 : w.placed x' = false := lost_not_placed hx'
+      have hxb : x' ∈ before (w.lines.models u) m := by
+        unfold World.lost at hx'
+        rcases find?_before hx' hw.model (by simp [hlostm]) with h1 | h1
+        · exact absurd h1 hxm
+        · exact h1
+      have := hC rfl hxb hx0
+      simp only [charged, true_or, or_true, and_self, ite_true]
+      exact this
+    · by_cases h0 : w.held t = 0
+      · -- `t` holds no card: the turn goes to somebody before it who holds none
+        obtain ⟨hfirst, hu0⟩ := firstLowest_first (rank := w.held) hw.tenant
+          (by obtain ⟨x', hx'⟩ := Option.isSome_iff_exists.mp hlost; simp [hx']) h0 hclaim
+        have hub : u ∈ before w.lines.tenants t := by
+          rcases hfirst with h1 | h1
+          · exact absurd h1 hut
+          · exact h1
+        have := hB hut h0 hub hu0
+        simp only [charged, true_or, h0, and_self, ite_true]
+        exact this
+      · have := hA hut h0
+        have hne : ¬ (some u = some t) := fun h1 => hut (Option.some.inj h1)
+        simp only [charged, h0, hne, or_self, and_false, ite_false, Nat.add_zero]
+        exact this
+  | stop i d dur hd hidle =>
+    have hup := (idleFor_spec hidle).1
+    have hs : d.serving = true := by simp [Card.serving, hup]
+    obtain ⟨hw', he⟩ := mpot_ended N t m { id := d.id } hw hd hs rfl
+    exact ⟨hw', by simpa [charged] using he⟩
+  | pass i d u mu hd hwin hown hmod =>
+    have hup := (winner_old hwin).1
+    have hs : d.serving = true := by simp [Card.serving, hup]
+    have hdmem : d ∈ w.cards := List.mem_of_getElem? hd
+    have hut : u ≠ t := by
+      rintro rfl
+      obtain ⟨m', hm'⟩ := Option.isSome_iff_exists.mp hlost
+      have hmm := winner_lost hwin hm'
+      subst hmm
+      have h1 := lost_not_placed hm'
+      have h2 : w.placed mu = true := by
+        unfold World.placed
+        rw [List.any_eq_true]
+        exact ⟨d, hdmem, by simp [hs, hmod.symm]⟩
+      rw [h1] at h2
+      cases h2
+    obtain ⟨hw', hA, hB⟩ := mpot_pass N t m (c' := { d with owner := some u, turnAt := w.now }) hw hd hs
+      (by simp [Card.serving, hup]) rfl rfl hut hown
+    refine ⟨hw', ?_⟩
+    by_cases h0 : w.held t = 0
+    · have hot : some t ≠ d.owner := by
+        intro h1
+        have := heldIn_pos hdmem hs h1.symm
+        rw [← held_eq] at this
+        omega
+      obtain ⟨hfirst, hrank⟩ := winner_first hwin hw.tenant hlost hot h0
+      have hub : u ∈ before w.lines.tenants t := by
+        rcases hfirst with h1 | h1
+        · exact absurd h1 hut
+        · exact h1
+      have hu0 : w.held u = 0 := by
+        simp only [World.rank, hown, ite_false] at hrank
+        omega
+      have := hB h0 hub hu0
+      simp only [charged, or_true, h0, true_or, and_self, ite_true]
+      exact this
+    · have := hA h0
+      have hne : ¬ (some u = some t) := fun h1 => hut (Option.some.inj h1)
+      simp only [charged, h0, hne, or_self, and_false, ite_false, Nat.add_zero]
+      exact this
+  | drain i d u mu hd hwin _ =>
+    have hup := (winner_old hwin).1
+    have hs : d.serving = true := by simp [Card.serving, hup]
+    obtain ⟨hw', he⟩ := mpot_ended N t m { d with st := .draining } hw hd hs rfl
+    exact ⟨hw', by simpa [charged] using he⟩
+
+/-- The charged turns of a round. -/
+def mcount : World T M C → Nat → Nat
+  | _, 0 => 0
+  | w, n + 1 =>
+    match w.rule with
+    | none => 0
+    | some (a, w') => charged t w a + mcount w' n
+
+/-- A whole round of rules, on any number of cards. -/
+theorem run_multi : ∀ (fuel : Nat) {w : World T M C}, MWaiting N t m w.cards w.lines →
+    (∀ a ∈ (w.run fuel).1, a.kind = .start → a.model ≠ some m) →
+    MWaiting N t m (w.run fuel).2.cards (w.run fuel).2.lines ∧
+      mPot N t m (w.run fuel).2.cards (w.run fuel).2.lines + mcount t w fuel ≤ mPot N t m w.cards w.lines := by
+  intro fuel
+  induction fuel with
+  | zero => intro w hw _; exact ⟨hw, by simp [World.run, mcount]⟩
+  | succ n ih =>
+    intro w hw hno
+    cases hr : w.rule with
+    | none =>
+      rw [run_none n hr]
+      exact ⟨hw, by simp [mcount, hr]⟩
+    | some p =>
+      obtain ⟨a, w'⟩ := p
+      rw [run_some n hr] at hno ⊢
+      obtain ⟨hw1, h1⟩ := rule_multi N t m hw hr (hno a (List.mem_cons_self ..))
+      obtain ⟨hw2, h2⟩ := ih hw1 fun b hb => hno b (List.mem_cons_of_mem _ hb)
+      refine ⟨hw2, ?_⟩
+      simp only [mcount, hr]
+      omega
+
+/-- The cards and the lines: what there is between rounds. -/
+structure MSys (T M C : Type) where
+  cards : List (Card T M C)
+  lines : Lines T M
+
+/-- What the world may do between rounds, to one card. -/
+inductive MEnv : MSys T M C → MSys T M C → Prop
+  /-- requests come and go -/
+  | busy (s : MSys T M C) (i : Nat) (c : Card T M C) (inflight busyAt : Nat) : s.cards[i]? = some c →
+      MEnv s { s with cards := s.cards.set i { c with inflight := inflight, busyAt := busyAt } }
+  /-- a load finishes: the turn begins -/
+  | loaded (s : MSys T M C) (i : Nat) (c : Card T M C) (now load : Nat) : s.cards[i]? = some c →
+      c.st = .starting →
+      MEnv s { s with cards := s.cards.set i { c with st := .up, turnAt := now, busyAt := now, load := load } }
+  /-- a load fails, or a server dies at work: the turn is over -/
+  | failed (s : MSys T M C) (i : Nat) (c : Card T M C) : s.cards[i]? = some c → c.serving = true →
+      MEnv s { cards := s.cards.set i { id := c.id }, lines := s.lines.ended c.owner c.model }
+  /-- a server dies while it drains: its turn was over already -/
+  | died (s : MSys T M C) (i : Nat) (c : Card T M C) : s.cards[i]? = some c → c.st = .draining →
+      MEnv s { s with cards := s.cards.set i { id := c.id } }
+
+/-- The world `decide` runs in. -/
+def MSys.world (s : MSys T M C) (flows : List (Flow T M)) (slots : M → Nat) (now : Nat) (pol : Policy) :
+    World T M C :=
+  { cards := s.cards, flows, slots, lines := s.lines.join flows, now, pol }
+
+/-- One round: `decide`'s actions, the cards as they leave them, and the lines. -/
+def MSys.round (s : MSys T M C) (flows : List (Flow T M)) (slots : M → Nat) (now : Nat) (pol : Policy) :
+    List (Action T M C) × MSys T M C :=
+  let r := (s.world flows slots now pol).run (3 * s.cards.length + 1)
+  (r.1, { cards := r.2.cards, lines := r.2.lines })
+
+/-- A round is `decide`. -/
+theorem mround_decide (s : MSys T M C) (flows : List (Flow T M)) (slots : M → Nat) (now : Nat) (pol : Policy) :
+    decide s.cards flows slots s.lines now pol =
+      ((s.round flows slots now pol).1, (s.round flows slots now pol).2.lines) := rfl
+
+/-- The charged turns of a round. -/
+def MSys.charged (s : MSys T M C) (flows : List (Flow T M)) (slots : M → Nat) (now : Nat) (pol : Policy) : Nat :=
+  mcount t (s.world flows slots now pol) (3 * s.cards.length + 1)
+
+/-- New requests: the flow still waits, and the measure is no higher. -/
+theorem mpot_join {cards : List (Card T M C)} {l : Lines T M} {flows : List (Flow T M)}
+    (hw : MWaiting N t m cards l) (hq : hasFlow flows t m = true) (hfew : (l.join flows).tenants.length ≤ N) :
+    MWaiting N t m cards (l.join flows) ∧ mPot N t m cards (l.join flows) ≤ mPot N t m cards l := by
+  have hqt : hasQueued flows t = true := by
+    simp only [hasFlow, hasQueued, List.any_eq_true, decide_eq_true_eq] at hq ⊢
+    obtain ⟨f, hf, h1, _⟩ := hq
+    exact ⟨f, hf, h1⟩
+  have hten : t ∈ (l.join flows).tenants := mem_join_tenants.mpr hqt
+  refine ⟨⟨join_nodup _ _, hten, mem_join_models.mpr hq, hfew, hw.away⟩, ?_⟩
+  have ha : aPart m ((l.join flows).models t) (placedIn cards) ≤ aPart m (l.models t) (placedIn cards) :=
+    aPart_le m (by rw [before_join_models (hw.nodup.2 t) hw.tenant hw.model hq]; exact List.filter_sublist)
+      fun _ _ h => h
+  have hp : pPart N t (l.join flows).tenants (heldIn cards) ≤ pPart N t l.tenants (heldIn cards) :=
+    pPart_le N t (by rw [before_join_tenants hw.nodup.1 hw.tenant hqt]; exact List.filter_sublist)
+      (fun _ _ h => h) hten hfew fun h => h
+  unfold mPot
+  exact Nat.add_le_add (Nat.mul_le_mul_right N ha) hp
+
+/-- What the world does between rounds: the flow still waits, and the
+measure is no higher. -/
+theorem menv_pot {s s' : MSys T M C} (hw : MWaiting N t m s.cards s.lines) (he : MEnv s s') :
+    MWaiting N t m s'.cards s'.lines ∧ mPot N t m s'.cards s'.lines ≤ mPot N t m s.cards s.lines := by
+  cases he with
+  | busy i c inflight busyAt hi =>
+    obtain ⟨hw', he⟩ := mpot_congr N t m { c with inflight := inflight, busyAt := busyAt } hw hi rfl
+      fun _ => ⟨rfl, rfl⟩
+    exact ⟨hw', le_of_eq he⟩
+  | loaded i c now load hi hst =>
+    obtain ⟨hw', he⟩ := mpot_congr N t m { c with st := .up, turnAt := now, busyAt := now, load := load } hw hi
+      (by simp [Card.serving, hst]) fun _ => ⟨rfl, rfl⟩
+    exact ⟨hw', le_of_eq he⟩
+  | failed i c hi hs => exact mpot_ended N t m { id := c.id } hw hi hs rfl
+  | died i c hi hst =>
+    have hs : c.serving = false := by simp [Card.serving, hst]
+    obtain ⟨hw', he⟩ := mpot_congr N t m { id := c.id } hw hi (by rw [hs]; rfl)
+      (by intro h1; rw [hs] at h1; cases h1)
+    exact ⟨hw', le_of_eq he⟩
+
+/-- Any history in which the flow (`t`, `m`) stays queued and `m` is not
+started, on any number of cards. The number is the charged turns. -/
+inductive MTrace : MSys T M C → Nat → MSys T M C → Prop
+  | nil (s : MSys T M C) : MTrace s 0 s
+  | env {s s1 s2 : MSys T M C} {n : Nat} : MTrace s n s1 → MEnv s1 s2 → MTrace s n s2
+  | round {s s1 : MSys T M C} {n : Nat} (flows : List (Flow T M)) (slots : M → Nat) (now : Nat) (pol : Policy) :
+      MTrace s n s1 → hasFlow flows t m = true → (s1.lines.join flows).tenants.length ≤ N →
+      (∀ a ∈ (s1.round flows slots now pol).1, a.kind = .start → a.model ≠ some m) →
+      MTrace s (n + s1.charged t flows slots now pol) (s1.round flows slots now pol).2
+
+theorem mtrace_pot {s s' : MSys T M C} {n : Nat} (h : MTrace N t m s n s') (hw : MWaiting N t m s.cards s.lines) :
+    MWaiting N t m s'.cards s'.lines ∧ mPot N t m s'.cards s'.lines + n ≤ mPot N t m s.cards s.lines := by
+  induction h with
+  | nil => exact ⟨hw, by simp⟩
+  | env _ he ih =>
+    obtain ⟨hw1, h1⟩ := ih
+    obtain ⟨hw2, h2⟩ := menv_pot N t m hw1 he
+    exact ⟨hw2, by omega⟩
+  | round flows slots now pol _ hq hfew hno ih =>
+    obtain ⟨hw1, h1⟩ := ih
+    obtain ⟨hwj, hj⟩ := mpot_join N t m hw1 hq hfew
+    obtain ⟨hw2, h2⟩ := run_multi N t m _ (w := MSys.world _ flows slots now pol) hwj hno
+    refine ⟨hw2, ?_⟩
+    have h3 := Nat.le_trans h2 hj
+    have h4 : mPot N t m (MSys.round _ flows slots now pol).2.cards (MSys.round _ flows slots now pol).2.lines +
+        MSys.charged t _ flows slots now pol ≤ mPot N t m _ _ := h3
+    omega
+
+/-- The measure is at most `K * N - 1`. -/
+theorem mPot_le {cards : List (Card T M C)} {l : Lines T M} {K : Nat} (hw : MWaiting N t m cards l)
+    (hK : (l.models t).length ≤ K) : mPot N t m cards l ≤ K * N - 1 := by
+  have hN : 1 ≤ N := by
+    have := List.length_pos_of_mem hw.tenant
+    have := hw.few
+    omega
+  have ha : aPart m (l.models t) (placedIn cards) ≤ K - 1 := by
+    unfold aPart
+    have h1 := List.length_filter_le (fun y => !placedIn cards y) (before (l.models t) m)
+    have h2 := before_length_lt hw.model
+    omega
+  have hp := pPart_le_max N t (heldIn cards) hw.tenant hw.few
+  have hK1 : 1 ≤ K := by
+    have := List.length_pos_of_mem hw.model
+    omega
+  unfold mPot
+  have h1 := Nat.mul_le_mul_right N ha
+  obtain ⟨k, rfl⟩ : ∃ k, K = k + 1 := ⟨K - 1, by omega⟩
+  have h3 : (k + 1) * N = k * N + N := by ring
+  simp only [Nat.add_sub_cancel] at h1
+  omega
+
+/-- **No starvation, on any number of cards, in turns.** While tenant `t`
+has requests queued for model `m`, and until `m` is started, at most
+`K * N - 1` turns begin that are `t`'s own or begin while `t` holds no
+card. -/
+theorem mturns_bound {s s' : MSys T M C} {n K : Nat} (h : MTrace N t m s n s')
+    (hw : MWaiting N t m s.cards s.lines) (hK : (s.lines.models t).length ≤ K) : n ≤ K * N - 1 := by
+  have h1 := (mtrace_pot N t m h hw).2
+  have h2 := mPot_le N t m hw hK
+  omega
+
+end multi
+
+assert_no_sorry mpot_ended
+assert_no_sorry mpot_start
+assert_no_sorry mpot_pass
+assert_no_sorry rule_multi
+assert_no_sorry mturns_bound
+
+end Timeshare

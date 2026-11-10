@@ -9,3 +9,6 @@ import Timeshare.Proofs.Potential
 import Timeshare.Proofs.Bound
 import Timeshare.Proofs.Progress
 import Timeshare.Proofs.Timed
+import Timeshare.Proofs.Multi
+import Timeshare.Proofs.MultiRule
+import Timeshare.Proofs.MultiBound
