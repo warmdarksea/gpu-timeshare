@@ -47,14 +47,16 @@ type Server interface {
 	Alive() bool
 }
 
-// New makes the Server a model's config describes.
-func New(cfg *config.Config, m *config.Model, logf func(string, ...any)) (Server, error) {
+// New makes the Server a model's config describes, for one card. gpu is
+// the card's name in the config ("" when there is only the one): it fills
+// {gpu}, and a command gets it as CUDA_VISIBLE_DEVICES.
+func New(cfg *config.Config, m *config.Model, gpu string, logf func(string, ...any)) (Server, error) {
 	c := &client{model: m, timeout: cfg.Scheduler.RequestTimeout.Duration, logf: logf}
 	if m.Unit != "" {
-		c.setURL(m.URL)
-		return &Unit{client: c, systemctl: cfg.Systemctl, unit: m.Unit}, nil
+		c.setURL(strings.ReplaceAll(m.URL, "{gpu}", gpu))
+		return &Unit{client: c, systemctl: cfg.Systemctl, unit: strings.ReplaceAll(m.Unit, "{gpu}", gpu)}, nil
 	}
-	return &Process{client: c, cfg: cfg}, nil
+	return &Process{client: c, cfg: cfg, gpu: gpu}, nil
 }
 
 // ---- talking to it ---------------------------------------------------------
@@ -183,6 +185,7 @@ func (c *client) waitReady(ctx context.Context, alive func() error) error {
 type Process struct {
 	*client
 	cfg *config.Config
+	gpu string
 
 	cmd     *exec.Cmd
 	exited  chan struct{}
@@ -200,10 +203,10 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// Expand fills {port} and {socket} into a command and its URL.
-func Expand(cfg *config.Config, m *config.Model) (argv []string, url string, err error) {
+// Expand fills {port}, {socket} and {gpu} into a command and its URL.
+func Expand(cfg *config.Config, m *config.Model, gpu string) (argv []string, url string, err error) {
 	joined := strings.Join(m.Command, "\x00") + m.URL
-	port, socket := "", filepath.Join(cfg.SocketDir(), sanitize(m.Name)+".sock")
+	port, socket := "", filepath.Join(cfg.SocketDir(), onGPU(m.Name, gpu)+".sock")
 	if strings.Contains(joined, "{port}") {
 		p, err := freePort()
 		if err != nil {
@@ -211,7 +214,7 @@ func Expand(cfg *config.Config, m *config.Model) (argv []string, url string, err
 		}
 		port = strconv.Itoa(p)
 	}
-	r := strings.NewReplacer("{port}", port, "{socket}", socket)
+	r := strings.NewReplacer("{port}", port, "{socket}", socket, "{gpu}", gpu)
 	for _, a := range m.Command {
 		argv = append(argv, r.Replace(a))
 	}
@@ -230,8 +233,17 @@ func sanitize(name string) string {
 	return strings.NewReplacer("/", "_", ":", "_").Replace(name)
 }
 
+// onGPU is a file name for a model on a card: two cards may have the same
+// model, and each copy needs a socket and a log of its own.
+func onGPU(name, gpu string) string {
+	if gpu == "" {
+		return sanitize(name)
+	}
+	return sanitize(name) + "@" + sanitize(gpu)
+}
+
 func (p *Process) Start(ctx context.Context) error {
-	argv, url, err := Expand(p.cfg, p.model)
+	argv, url, err := Expand(p.cfg, p.model, p.gpu)
 	if err != nil {
 		return err
 	}
@@ -239,7 +251,7 @@ func (p *Process) Start(ctx context.Context) error {
 	if path, ok := strings.CutPrefix(url, "unix:"); ok {
 		os.Remove(path) // a stale socket from a server that died
 	}
-	log, err := os.OpenFile(filepath.Join(p.cfg.LogsDir(), sanitize(p.model.Name)+".log"),
+	log, err := os.OpenFile(filepath.Join(p.cfg.LogsDir(), onGPU(p.model.Name, p.gpu)+".log"),
 		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o640)
 	if err != nil {
 		return err
@@ -247,6 +259,9 @@ func (p *Process) Start(ctx context.Context) error {
 	fmt.Fprintf(log, "\n--- %s gpu-timeshare: starting %q\n", time.Now().Format(time.RFC3339), argv)
 	p.cmd = exec.Command(argv[0], argv[1:]...)
 	p.cmd.Env = os.Environ()
+	if p.gpu != "" {
+		p.cmd.Env = append(p.cmd.Env, "CUDA_VISIBLE_DEVICES="+p.gpu)
+	}
 	for k, v := range p.model.Environment {
 		p.cmd.Env = append(p.cmd.Env, k+"="+v)
 	}
@@ -399,16 +414,18 @@ func (u *Unit) Alive() bool {
 func StopUnits(cfg *config.Config) error {
 	var errs []error
 	for _, n := range cfg.Names() {
-		u := cfg.Models[n].Unit
-		if u == "" {
-			continue
-		}
-		// one call per unit: polkit refused one "systemctl stop a b" while
-		// allowing each alone (the VM test), so a rule naming exactly these
-		// units is enough
-		argv := append(append([]string(nil), cfg.Systemctl...), "stop", u)
-		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %v: %s", strings.Join(argv, " "), err, strings.TrimSpace(string(out))))
+		for _, g := range cfg.GPUList() {
+			u := strings.ReplaceAll(cfg.Models[n].Unit, "{gpu}", g)
+			if u == "" {
+				continue
+			}
+			// one call per unit: polkit refused one "systemctl stop a b" while
+			// allowing each alone (the VM test), so a rule naming exactly these
+			// units is enough
+			argv := append(append([]string(nil), cfg.Systemctl...), "stop", u)
+			if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %v: %s", strings.Join(argv, " "), err, strings.TrimSpace(string(out))))
+			}
 		}
 	}
 	return errors.Join(errs...)

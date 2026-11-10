@@ -2,7 +2,7 @@
 
 # gpu-timeshare
 
-One GPU, many models, the OpenAI API in front.
+A GPU or a few, many models, many tenants, the OpenAI API in front.
 
 You have more models than fit on the card at once. A server that loads
 whichever model each request names would spend its time reloading weights
@@ -14,14 +14,21 @@ batch.
 - **The OpenAI API.** `/v1/chat/completions` (and any other endpoint you
   list), `/v1/models`, `/v1/files` and `/v1/batches`. Point an OpenAI SDK
   at it with a token as the API key.
-- **Taking turns, without starving anyone.** One model has the card at
-  a time. Once it has had it for `max_timeslice` while another model
-  waits, it drains and leaves, and the model whose turn it is loads. A
-  TLA+ model of the scheduler, checked by TLC, shows every model with
-  work is served within *n* turns (see [The scheduler](#the-scheduler)). Within a model, clients take turns
-  round-robin, and each client's requests go oldest first (single
-  requests ahead of batch lines: someone is holding a connection open for
-  those).
+- **Taking turns, without starving anyone.** A card holds one model at a
+  time, and its time is cut into turns that belong to *tenants* (the
+  clients), so nobody gets more by spreading work over more models or by
+  queueing more of it. A model keeps its card while it has work; once its
+  turn is `max_timeslice` old and another tenant's turn has come, it
+  drains and leaves -- or, if that tenant wants the same model, nothing is
+  swapped at all. A TLA+ model of the scheduler, checked by TLC, bounds
+  how long any request's model can be kept off the cards (see
+  [The scheduler](#the-scheduler)). Within a model, free slots go to the
+  tenant with the fewest requests in flight, and each tenant's requests go
+  oldest first (single requests ahead of batch lines: someone is holding a
+  connection open for those).
+- **More than one GPU**, if you have them (`gpus`): a model with more
+  queued than one card takes is loaded on a free one too, and the cards
+  are shared between tenants as evenly as they divide.
 - **Idle unload.** A model with no work for `idle` stops, so an empty
   queue leaves nothing on the card and it can drop to its idle power state.
 - **A cache.** Every answer is kept verbatim, keyed by the question: the
@@ -127,6 +134,7 @@ with its default, except the models:
 listen    = "127.0.0.1:8100"
 state_dir = "."                       # timeshare.db, files/, logs/, run/ (the models' sockets)
 systemctl = ["systemctl"]             # for models run as units; ["systemctl", "--user"] for a user manager
+# gpus    = ["0", "1"]                # more than one card: see below
 endpoints = ["/v1/chat/completions", "/v1/completions", "/v1/embeddings"]
 
 [tls]                                 # both, or neither; re-read when they change
@@ -135,7 +143,8 @@ key  = ""
 
 [scheduler]
 idle            = "10m"               # stop a model after this long with no work (0: never)
-max_timeslice   = "2h"                # the model on the card gives way this long after loading, if another waits
+max_timeslice   = "2h"                # a turn this old can be taken, if another tenant's turn has come
+load_ratio      = 4                   # ... and only once it is this many times as old as the model took to load
 max_attempts    = 3                   # per request: a failed connection, a 5xx or a 429 counts
 start_timeout   = "15m"
 request_timeout = "10m"
@@ -174,6 +183,14 @@ choice: on a TCP port, any local user can reach the model without a
 token. vLLM listens on one with `--uds`. (With the NixOS module, each model
 unit has a loopback of its own, so `{port}` is safe there too.)
 
+With `gpus = ["0", "1"]` there are two cards, and a model may be on both
+at once. `{gpu}` in a command, a unit or a url becomes the card's name,
+and a command also gets it as `CUDA_VISIBLE_DEVICES`; each copy has its
+own `{socket}` and log. A unit model needs `{gpu}` in both its unit and
+its url (a template unit, `model@{gpu}.service`). Without `gpus` there is
+one card and the models are told nothing about it. The NixOS module still
+writes one unit per model: one card.
+
 ### Clients
 
 ```
@@ -194,49 +211,73 @@ in flight. `GET /health` answers with no token.
 
 ## The scheduler
 
-Two levels. Which model has the card is `Decide`
-(`internal/sched/policy.go`, one page). Which requests a loaded model gets
-is round-robin between clients, oldest first within each.
+Two levels, both in `internal/sched/policy.go` (the whole algorithm, one
+file). `Decide` says which model is on which card and whose turn it is;
+`RoundRobin` says which requests a model that is up gets.
+[doc/VERIFICATION.md](doc/VERIFICATION.md) has the algorithm in full, why
+each rule is there, the worst-case bounds and the TLA+ model that checks
+them. In short:
 
-**One model has the card at a time.** Two models can share it if they fit,
-but sharing buys nothing when both are busy: measured on a 3090 with two
-vLLM servers that fit side by side (deepseek-ocr and joycaption), each ran
-at 49% of its speed alone, 98% of one model's work between them. The GPU
-takes turns between processes; it doesn't run them at once. Sharing only
-saves the swap, and with one model at a time there are no sizes to get
-right. So each model can have the whole card (for vLLM:
-`--gpu-memory-utilization 0.9` or so, a bigger KV cache).
+**One model per card at a time.** Two models can share a card if they
+fit, but sharing buys nothing when both are busy: measured on a 3090 with
+two vLLM servers that fit side by side (deepseek-ocr and joycaption), each
+ran at 49% of its speed alone. The GPU takes turns between processes; it
+doesn't run them at once. Sharing only saves the swap, and with one model
+at a time there are no sizes to get right. So each model can have the
+whole card (for vLLM: `--gpu-memory-utilization 0.9` or so, a bigger KV
+cache).
 
-Each round:
+**Turns belong to tenants.** Tenants with queued requests stand in a line,
+and each keeps a line of its own models; whoever has waited longest is
+first. Each round:
 
-1. A draining model with nothing in flight stops.
-2. A model with nothing to do stops, at once if another model is waiting,
-   or after `idle`.
-3. A model that loaded `max_timeslice` ago, while another model waits,
-   drains: it finishes what it's doing and takes nothing new.
-4. If the card is free, the waiting model whose **turn** it is starts: the
-   one that loaded longest ago (never counts as longest).
+1. A draining card with nothing in flight stops.
+2. A free card goes to the first tenant in line that has a model on no
+   card (fewest cards first), for that tenant's first such model. Failing
+   that, to a model with more queued than its cards can take: a copy.
+3. An idle card stops at once if a model is on no card, or after `idle`.
+4. When a turn is `max_timeslice` old (and `load_ratio` times as old as
+   the model took to load), the tenant with the best claim gets the card:
+   fewest cards first, then the line, the owner last among equals. If it
+   wants the model that is there, the turn *passes* and nothing is
+   swapped; otherwise the card drains (one card at a time).
 
-**The guarantee.** Take *n* models, and say a turn lasts at most a load,
-`max_timeslice` and a drain. Then a model with work is served (loaded, with
-the card for `max_timeslice`) within *n* − 1 turns, plus its own drain if it
-was on the card and its own load, unless its work runs out first. However
-hostile the loads, drains and arriving work are: a load is at most
-`start_timeout` and a drain at most `request_timeout`, so the worst case is
-about (*n* − 1) × (`max_timeslice` + `start_timeout` + `request_timeout`);
-with loads of a few minutes, it is about (*n* − 1) × `max_timeslice`. The
-bound is tight: TLC finds a model that waits exactly that long.
+With nobody else to serve, a model keeps its card for as long as it has
+work. Everyone with requests for a model that is up is answered during
+its turn, whoever's turn it is.
 
-`spec/Timeslice.tla` is the same algorithm in TLA+, rule for rule (the
-`[Name]` comments in `policy.go` are its actions). `nix-build -A tests.tla`
-has TLC check the guarantee against every interleaving for three, four and
-five models (seconds; six take a few minutes), and check that one tick
-less is violated. `TestNoStarvation` checks the same bound against
-`Decide` itself, in 500 random worlds, and that two models are never on
-the card at once.
+**The guarantees**, for any arrivals, load times and request times within
+their limits:
 
-[doc/DESIGN.md](doc/DESIGN.md) has the algorithm in detail, the code
-annotated, and how the TLA+ model maps to it.
+- A model is only taken off a card when it is idle or its turn is
+  `max_timeslice` old, so swapping costs at most a load and a drain per
+  `max_timeslice` of work.
+- Say a turn lasts at most a load, `max_timeslice` and a drain. With *T*
+  tenants and *M* models having requests, a request whose tenant has
+  requests queued for *k* models sees its model up within
+  min(*T*·*k*, *T*·(*M* − 1)) turns, plus its own drain and load --
+  however much the others have queued, and however long ago. For one
+  tenant that is the old bound, (*M* − 1) turns, and TLC finds a wait
+  exactly that long.
+- Each tenant with work gets the same number of turns, and the cards are
+  split between tenants to within one.
+
+`spec/Turns.tla` is the same algorithm in TLA+, rule for rule (the
+`[Name]` comments in `policy.go` are its actions). `nix-build -A
+tests.tla` has TLC check the bound and four other invariants against
+every interleaving for one and two cards and up to three tenants and
+models, and check that one tick under the bound is violated.
+`proof/` is the algorithm once more, in Lean 4, with machine-checked
+proofs. For any number of tenants, models and cards: no rule
+stops a card that is answering, no turn is cut short, and a
+round ends within three decisions a card. For one card and any number of
+tenants and models: a waiting flow sees at most *T*·*k* turns begin before
+its own, and the scheduler never sits on a decision (the bound in time,
+and several cards, are not proved
+yet). `nix-build -A tests.lean` checks them and runs the Lean model
+against 90,000 rounds of the Go code's own decisions.
+`TestNoStarvation` checks the same things against `Decide` itself in 200
+random worlds of up to three cards.
 
 ## NixOS
 
@@ -282,7 +323,8 @@ Clients trust `/var/lib/gpu-timeshare/tls/timeshare.crt`.
 ```
 nix-build                    # gpu-timeshare; the go tests run in the build (-A stub: the fake model server)
 nix-build -A tests.nixos     # VM: the module, sandboxed units, the OpenAI SDK over TLS
-nix-build -A tests.tla       # TLC: the scheduler's model starves no one
+nix-build -A tests.tla       # TLC: the scheduler's model starves no one (doc/VERIFICATION.md)
+nix-build -A tests.lean      # Lean: the proofs type-check, and the Lean model decides as the Go code does
 go test ./...                # the same go tests, no nix needed
 ```
 

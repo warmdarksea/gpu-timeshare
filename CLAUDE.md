@@ -1,16 +1,25 @@
 # gpu-timeshare
 
-One GPU, many models, the OpenAI API in front (README.md says what and
+GPUs, many models, many tenants, the OpenAI API in front (README.md says what and
 why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 (not a flake), with a NixOS module in `nix/module.nix`.
 
 ## Layout
 
-- `internal/sched`: `policy.go` (`Decide`: the whole scheduling algorithm,
-  one page, a pure function of the models' states; `card.go` its types and
-  primitives; `spec/Timeslice.tla` is its TLA+ model) and
-  `driver.go` (applies it, dispatches round-robin between clients, never
-  two requests with the same cache key at once).
+- `internal/sched`: `policy.go` is the whole scheduling algorithm in one
+  file, its types included (the user wants it in one place, to read beside
+  the English and the TLA+): `Decide` (which model on which card, whose
+  turn; pure: cards, flows and lines in, actions and lines out) and
+  `RoundRobin` (which requests a model that is up gets). `spec/Turns.tla`
+  is `Decide`'s TLA+ model. `driver.go` applies them: one `card` per GPU,
+  the lines kept in memory, never two requests with the same cache key at
+  once.
+- `proof/`: the algorithm in Lean 4 (`Timeshare/Policy.lean`: executable,
+  imports nothing so `timeshare-check` can link; Mathlib has no objects)
+  and proofs about it (`Timeshare/Proofs/`, Mathlib). Every proof file
+  ends in `assert_no_sorry`; a new module goes into `Timeshare.lean`.
+  To iterate without nix: `lean -o` each module with `LEAN_PATH` set to
+  the `.lake/build/lib/lean` of mathlib and its `allLeanDeps`.
 - `internal/queue`: the requests not yet delivered, the answer cache
   (key = endpoint + model identity + canonical JSON body), cache
   expiry, `Cache-Control`/`Cache-Status`.
@@ -20,7 +29,8 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 - `internal/upstream`: a model server as a child process (process
   group, killed whole) or a systemd unit (systemctl).
 - `internal/api`: HTTP, OpenAI-shaped errors.
-- `doc/DESIGN.md` (the scheduler, its code and its TLA+ model) and
+- `doc/VERIFICATION.md` (the scheduler: the algorithm, its bounds, its
+  TLA+ model and what TLC checked) and
   `doc/SECURITY.md` (the sandbox, its gaps, how to examine it). Change
   them with the code they describe.
 - `bin/sandbox-report`: what a running process can reach, from /proc and
@@ -29,14 +39,29 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 
 ## Invariants
 
-- `policy.go` and `spec/Timeslice.tla` are the same algorithm, rule for
-  rule (`[Name]` in `Decide` is the action in the spec). Change them
-  together, and run `nix-build -A tests.tla` (TLC) as well as
-  `TestNoStarvation`.
-- One model on the card at a time, deliberately: two busy models sharing
-  it each ran at half speed (measured), so sharing saves only the swap.
+- `policy.go`, `spec/Turns.tla`, `proof/Timeshare/Policy.lean` and
+  `doc/VERIFICATION.md` §2 are the same algorithm, rule for rule (`[Name]`
+  in `policy.go` is the action in the spec; the Lean functions have the Go
+  names). Change them together, and run `nix-build -A tests.tla` (TLC) and
+  `nix-build -A tests.lean` (the Lean model against Go's decisions) as
+  well as `go test ./internal/sched`. TLC found three starvation bugs, a
+  double drain and a wrong bound in drafts that looked right on paper
+  (VERIFICATION.md, section 9), and proving in Lean that a round ends
+  found that `max_timeslice = "0"` hung `Decide`; don't trust a change
+  they haven't seen.
+- Turns belong to tenants, not models (the user's call): a tenant must not
+  get more of the cards by spreading over models or by queueing more.
+- One model per card at a time, deliberately: two busy models sharing a
+  card each ran at half speed (measured), so sharing saves only the swap.
   There are no costs or capacity; don't add them back without a
-  measurement that says sharing pays.
+  measurement that says sharing pays. Several cards (`gpus`) are several
+  whole cards; a model may be on more than one (a copy), but a copy never
+  takes a card it would have to give back, and an idle card doesn't stop
+  for one.
+- TLC's JVM takes a quarter of the machine's memory by default, and its
+  state files are big: run it with `JAVA_TOOL_OPTIONS=-Xmx4g`, a few at a
+  time, with `-metadir` on disk and not in a tmpfs. (Eleven at once with
+  /tmp as scratch is the likely cause of a session the OOM killer took.)
 
 - The contract with a model is the OpenAI HTTP API, nothing else.
   Don't add per-server special cases.
@@ -60,8 +85,11 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 `go test ./...` (also inside `nix-build`): end to end against
 `gpu-timeshare-stub` (not installed: `-A stub`), unit mode against a
 shell-script systemctl.
-`nix-build -A tests.tla`: TLC on the scheduler's model (a few minutes;
-`spec/four.cfg` by hand takes longer).
+`nix-build -A tests.tla`: TLC on the scheduler's model (a minute or two;
+`spec/big.cfg` by hand takes several).
+`nix-build -A proof` type-checks the Lean proofs; `nix-build -A tests.lean`
+also runs the Lean model on every round `TestCases` writes (seconds, once
+Mathlib is in the store: 1.6 GB).
 `nix-build -A tests.nixos`: the module in a VM, the official OpenAI
 Python SDK over TLS, the sandbox probed from inside (the stub's
 `--probe-read`/`--probe-dial`) against a process-mode control.

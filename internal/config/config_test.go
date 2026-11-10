@@ -74,6 +74,9 @@ func TestLoadRefuses(t *testing.T) {
 		"duration":                 "[scheduler]\nidle = \"soon\"\n[models.a]\ncommand = [\"x\", \"{port}\"]\n",
 		"size":                     "[limits]\nmax_file = \"big\"\n[models.a]\ncommand = [\"x\", \"{port}\"]\n",
 		"url":                      "[models.a]\nunit = \"a.service\"\nurl = \"ftp://x\"\n",
+		"must name {gpu}":          "gpus = [\"0\", \"1\"]\n[models.a]\nunit = \"a.service\"\nurl = \"unix:/run/a.sock\"\n",
+		"named twice":              "gpus = [\"0\", \"0\"]\n[models.a]\ncommand = [\"x\", \"{port}\"]\n",
+		"load_ratio":               "[scheduler]\nload_ratio = -1\n[models.a]\ncommand = [\"x\", \"{port}\"]\n",
 	} {
 		_, err := load(t, s)
 		if err == nil || !strings.Contains(err.Error(), want) {

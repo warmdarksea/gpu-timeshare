@@ -65,7 +65,7 @@ func main() {
 			logf(map[string]any{"event": "child", "child": c.Process.Pid})
 		}
 	}
-	logf(map[string]any{"event": "start"})
+	logf(map[string]any{"event": "start", "gpu": os.Getenv("CUDA_VISIBLE_DEVICES")})
 	probe(*probeRead, *probeDial)
 	time.Sleep(*start)
 

@@ -177,6 +177,33 @@ func (q *Queue) Counts() (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// Flow is one client's queued requests for one model (the ones being
+// answered included: they stay queued until they are done).
+type Flow struct {
+	Client, Model string
+	Queued        int
+	Oldest        int64 // the id of its oldest
+}
+
+// Flows is what is queued, by model and client, in that order.
+func (q *Queue) Flows() ([]Flow, error) {
+	rows, err := q.DB.Query(`SELECT model, client, COUNT(*), MIN(id) FROM requests WHERE state = 'queued'
+		GROUP BY model, client ORDER BY model, client`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Flow
+	for rows.Next() {
+		var f Flow
+		if err := rows.Scan(&f.Model, &f.Client, &f.Queued, &f.Oldest); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // Queued returns up to limit of a model's queued requests per client,
 // each client's oldest first, single requests (someone is waiting) before
 // batch lines.

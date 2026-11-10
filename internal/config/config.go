@@ -78,6 +78,10 @@ type Config struct {
 	// systemctl and its leading arguments, for models run as units
 	// (["systemctl", "--user"] for a user manager)
 	Systemctl []string `toml:"systemctl"`
+	// the cards, when there is more than one: what a model's {gpu} becomes
+	// (and, for a command, its CUDA_VISIBLE_DEVICES). Unset: one card, and
+	// nothing is said to the models about it.
+	GPUs []string `toml:"gpus"`
 
 	TLS       TLS               `toml:"tls"`
 	Scheduler Scheduler         `toml:"scheduler"`
@@ -96,7 +100,8 @@ type TLS struct {
 
 type Scheduler struct {
 	Idle           Duration `toml:"idle"`            // stop a model after this long with no work (0: never)
-	MaxTimeslice   Duration `toml:"max_timeslice"`   // the model on the card gives way this long after loading, if another waits
+	MaxTimeslice   Duration `toml:"max_timeslice"`   // a turn can be taken once it is this old, if somebody else has a better claim
+	LoadRatio      float64  `toml:"load_ratio"`      // ... and this many times as old as the model took to load
 	MaxAttempts    int      `toml:"max_attempts"`    // per request, before it fails
 	StartTimeout   Duration `toml:"start_timeout"`   // default for every model
 	RequestTimeout Duration `toml:"request_timeout"` // one request to a model
@@ -179,6 +184,7 @@ func Default() *Config {
 		Scheduler: Scheduler{
 			Idle:           Duration{10 * time.Minute},
 			MaxTimeslice:   Duration{2 * time.Hour},
+			LoadRatio:      4,
 			MaxAttempts:    3,
 			StartTimeout:   Duration{15 * time.Minute},
 			RequestTimeout: Duration{10 * time.Minute},
@@ -212,6 +218,16 @@ func (c *Config) check() error {
 			return fmt.Errorf("endpoint %q: want a path under /v1/", e)
 		}
 	}
+	if c.Scheduler.LoadRatio < 0 {
+		return errors.New("scheduler.load_ratio must not be negative")
+	}
+	seen := map[string]bool{}
+	for _, g := range c.GPUs {
+		if g == "" || seen[g] {
+			return fmt.Errorf("gpus: %q is empty or named twice", g)
+		}
+		seen[g] = true
+	}
 	if len(c.Models) == 0 {
 		return errors.New("no [models.NAME] sections")
 	}
@@ -222,6 +238,9 @@ func (c *Config) check() error {
 		}
 		if (len(m.Command) == 0) == (m.Unit == "") {
 			return fmt.Errorf("model %s: give exactly one of command or unit", name)
+		}
+		if m.Unit != "" && len(c.GPUs) > 1 && !(strings.Contains(m.Unit, "{gpu}") && strings.Contains(m.URL, "{gpu}")) {
+			return fmt.Errorf("model %s: with several gpus, a unit and its url must name {gpu} (one unit per card)", name)
 		}
 		if m.Unit != "" && m.URL == "" {
 			return fmt.Errorf("model %s: a unit needs a url", name)
@@ -301,4 +320,12 @@ func (c *Config) Allows(endpoint string) bool {
 		}
 	}
 	return false
+}
+
+// GPUList is the cards: the configured ones, or one without a name.
+func (c *Config) GPUList() []string {
+	if len(c.GPUs) == 0 {
+		return []string{""}
+	}
+	return c.GPUs
 }

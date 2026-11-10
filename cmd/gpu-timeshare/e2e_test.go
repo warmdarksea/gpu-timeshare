@@ -175,6 +175,7 @@ type event struct {
 	Child  int    `json:"child"`
 	T      int64  `json:"t"`
 	Inflt  int    `json:"inflight"`
+	GPU    string `json:"gpu"`
 }
 
 func (e *env) events() []event {
@@ -839,4 +840,80 @@ func TestBatchOneModel(t *testing.T) {
 	if n := len(e.requests()); n != 0 {
 		t.Errorf("a failed batch asked upstream %d times", n)
 	}
+}
+
+// Two cards. A model with more queued than one card takes gets a copy on
+// the free card (each told which card is its own); when another model is
+// asked for, an idle copy gives way, and both models are up at once.
+func TestTwoCards(t *testing.T) {
+	e := startTop(t, `gpus = ["0", "1"]`, `idle = "10m"`, `
+[models.a]
+command = ["STUB", "--uds", "{socket}", "--name", "upstream-a", "--log", "LOG", "--delay", "150ms"]
+concurrency = 2
+
+[models.b]
+command = ["STUB", "--port", "{port}", "--name", "upstream-b", "--log", "LOG"]
+concurrency = 2
+`)
+	var lines []string
+	for i := range 24 {
+		lines = append(lines, line(fmt.Sprintf("a-%d", i), "a", fmt.Sprintf("picture %d", i)))
+	}
+	b := e.batch("alice", upload(e, "alice", lines), nil)
+	e.await("alice", b["id"].(string), "completed")
+	gpus, answered := map[string]bool{}, map[int]int{}
+	for _, ev := range e.events() {
+		switch ev.Event {
+		case "start":
+			gpus[ev.GPU] = true
+		case "request":
+			answered[ev.PID]++
+		}
+	}
+	if !gpus["0"] || !gpus["1"] || len(gpus) != 2 || len(answered) != 2 {
+		t.Errorf("a ran on cards %v, answers by process %v: want a copy on each card, both answering", gpus, answered)
+	}
+	if r := e.ask("bob", "b", "hi", nil); r.status != 200 {
+		t.Fatalf("%d %s", r.status, r.body)
+	}
+	st := e.do("GET", "/v1/timeshare/status", "alice", nil, nil).json(t)
+	for _, m := range st["models"].([]any) {
+		if m := m.(map[string]any); m["state"] != "up" || len(m["cards"].([]any)) != 1 {
+			t.Errorf("after b: %v", m)
+		}
+	}
+	if !strings.Contains(e.serverLog(), "a on card") || !strings.Contains(e.serverLog(), "nothing to do, and a model waits") {
+		t.Errorf("the log:\n%s", e.serverLog())
+	}
+}
+
+// A long batch doesn't keep the card from somebody else: once alice's
+// turn is max_timeslice old, bob's model has the card, and alice's batch
+// goes on afterwards.
+func TestTurns(t *testing.T) {
+	e := start(t, `max_timeslice = "400ms"
+load_ratio = 0`, `
+[models.a]
+command = ["STUB", "--uds", "{socket}", "--name", "upstream-a", "--log", "LOG", "--delay", "100ms"]
+concurrency = 2
+
+[models.b]
+command = ["STUB", "--port", "{port}", "--name", "upstream-b", "--log", "LOG"]
+`)
+	var lines []string
+	for i := range 60 {
+		lines = append(lines, line(fmt.Sprintf("a-%d", i), "a", fmt.Sprintf("picture %d", i)))
+	}
+	b := e.batch("alice", upload(e, "alice", lines), nil)
+	waitFor(t, 10*time.Second, "a to be answering", func() bool { return len(e.requests()) > 0 })
+	if r := e.ask("bob", "b", "hi", nil); r.status != 200 {
+		t.Fatalf("%d %s", r.status, r.body)
+	}
+	if n := len(e.requests()); n > 40 {
+		t.Errorf("bob was answered after %d of alice's 60", n)
+	}
+	if !strings.Contains(e.serverLog(), "a: alice's turn is") {
+		t.Errorf("no drain in the log:\n%s", e.serverLog())
+	}
+	e.await("alice", b["id"].(string), "completed")
 }

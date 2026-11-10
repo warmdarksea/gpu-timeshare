@@ -312,6 +312,6 @@ func check(args []string) error {
 func wire(cfg *config.Config, d *sql.DB, q *queue.Queue, logf func(string, ...any)) (*api.Server, *sched.Scheduler) {
 	bs := &batch.Store{DB: d, Cfg: cfg, Q: q}
 	sc := &sched.Scheduler{Cfg: cfg, Q: q, B: bs, Logf: logf,
-		NewServer: func(m *config.Model) (upstream.Server, error) { return upstream.New(cfg, m, logf) }}
+		NewServer: func(m *config.Model, gpu string) (upstream.Server, error) { return upstream.New(cfg, m, gpu, logf) }}
 	return &api.Server{Cfg: cfg, Auth: auth.New(d), Q: q, B: bs, Sched: sc, Logf: logf}, sc
 }

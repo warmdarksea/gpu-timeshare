@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,30 +19,42 @@ type Scheduler struct {
 	Cfg       *config.Config
 	Q         *queue.Queue
 	B         *batch.Store
-	NewServer func(*config.Model) (upstream.Server, error)
+	NewServer func(m *config.Model, gpu string) (upstream.Server, error)
 	Tick      time.Duration
 	Logf      func(format string, a ...any)
 
 	mu      sync.Mutex
-	slots   map[string]*slot
-	running map[int64]run   // request id -> what it is
-	keys    map[string]bool // cache keys being answered
-	cursor  map[string]string
+	cards   []*card            // one per GPU
+	health  map[string]*health // by model
+	lines   Lines              // who has waited longest (policy.go)
+	running map[int64]run      // request id -> what it is
+	keys    map[string]bool    // cache keys being answered
+	cursor  map[string]string  // by model: the tenant served last
 	waiters map[int64]chan struct{}
 	wake    chan struct{}
 	ready   chan struct{} // closed once Run has set up
 	once    sync.Once
 }
 
-type run struct{ batch, key string }
+type run struct{ batch, key, client, model string }
 
-type slot struct {
-	model      *config.Model
-	server     upstream.Server
-	state      State
-	upSince    time.Time // when it last finished loading (Decide's LoadedAt)
-	busyAt     time.Time
-	inflight   int
+// card is one GPU and what is on it.
+type card struct {
+	id       string // Decide's name for it
+	gpu      string // the config's
+	model    *config.Model
+	server   upstream.Server
+	state    State
+	owner    string        // the tenant whose turn it is
+	turnAt   time.Time     // when the turn began (Decide's TurnAt)
+	upSince  time.Time     // when the model finished loading
+	load     time.Duration // how long that took
+	busyAt   time.Time
+	inflight int
+}
+
+// health is a model's record of failing.
+type health struct {
 	startFails int
 	brokenAt   time.Time // zero: not broken
 	lastError  string
@@ -57,11 +68,14 @@ func (s *Scheduler) logf(format string, a ...any) {
 
 func (s *Scheduler) init() {
 	s.once.Do(func() {
-		s.slots, s.running, s.keys = map[string]*slot{}, map[int64]run{}, map[string]bool{}
+		s.health, s.running, s.keys = map[string]*health{}, map[int64]run{}, map[string]bool{}
 		s.cursor, s.waiters = map[string]string{}, map[int64]chan struct{}{}
 		s.wake, s.ready = make(chan struct{}, 1), make(chan struct{})
 		for _, n := range s.Cfg.Names() {
-			s.slots[n] = &slot{model: s.Cfg.Models[n]}
+			s.health[n] = &health{}
+		}
+		for i, g := range s.Cfg.GPUList() {
+			s.cards = append(s.cards, &card{id: fmt.Sprint("card", i), gpu: g})
 		}
 		if s.Tick == 0 {
 			s.Tick = 200 * time.Millisecond
@@ -162,7 +176,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 // round is one pass: decide, apply, dispatch.
 func (s *Scheduler) round(ctx context.Context) error {
-	counts, err := s.Q.Counts()
+	queued, err := s.Q.Flows()
 	if err != nil {
 		return err
 	}
@@ -171,75 +185,116 @@ func (s *Scheduler) round(ctx context.Context) error {
 	now := time.Now()
 	brokenFor := s.Cfg.Scheduler.BrokenFor.Duration
 
-	var models []Model
-	var refuse []string
-	for _, name := range s.Cfg.Names() {
-		sl := s.slots[name]
-		if (sl.state == Up || sl.state == Draining) && !sl.server.Alive() {
+	for _, c := range s.cards {
+		if (c.state == Up || c.state == Draining) && !c.server.Alive() {
 			// a server that dies at work is as broken as one that won't
 			// start: restarting it only burns attempts
-			if now.Sub(sl.upSince) > 10*time.Minute {
-				sl.startFails = 0 // it worked for a while: a fresh failure, not a pattern
+			h := s.health[c.model.Name]
+			if now.Sub(c.upSince) > 10*time.Minute {
+				h.startFails = 0 // it worked for a while: a fresh failure, not a pattern
 			}
-			sl.state, sl.server = Down, nil
-			s.failedStart(name, sl, "the server exited")
+			s.failed(c, "the server exited")
 		}
-		if !sl.brokenAt.IsZero() && now.Sub(sl.brokenAt) >= brokenFor {
-			sl.brokenAt, sl.startFails = time.Time{}, 0
+	}
+	// the flows: what is queued and not in flight, less what a broken model is refused
+	inflight := map[[2]string]int{} // by tenant and model
+	for _, r := range s.running {
+		inflight[[2]string{r.client, r.model}]++
+	}
+	var flows []Flow
+	work := map[string]int{} // by model
+	var refuse []string
+	for _, name := range s.Cfg.Names() {
+		h := s.health[name]
+		if !h.brokenAt.IsZero() && now.Sub(h.brokenAt) >= brokenFor {
+			h.brokenAt, h.startFails = time.Time{}, 0
 			s.logf("%s: trying it again", name)
 		}
-		ready := counts[name] - sl.inflight
-		if ready < 0 {
-			ready = 0
+	}
+	for _, f := range queued {
+		h := s.health[f.Model]
+		if h == nil {
+			continue // a model the config no longer has
 		}
-		if !sl.brokenAt.IsZero() {
-			if ready > 0 {
-				refuse = append(refuse, name)
+		n := f.Queued - inflight[[2]string{f.Client, f.Model}]
+		if n <= 0 {
+			continue
+		}
+		if !h.brokenAt.IsZero() {
+			if len(refuse) == 0 || refuse[len(refuse)-1] != f.Model {
+				refuse = append(refuse, f.Model)
 			}
-			ready = 0
+			continue
 		}
-		if ready > 0 || sl.inflight > 0 || sl.state == Starting {
-			sl.busyAt = now
-		}
-		models = append(models, Model{Name: name, State: sl.state,
-			Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt, LoadedAt: sl.upSince})
+		flows = append(flows, Flow{Tenant: f.Client, Model: f.Model, Queued: n, Oldest: f.Oldest})
+		work[f.Model] += n
 	}
 	for _, name := range refuse {
 		ids, err := s.Q.FailQueued(name, "model_unavailable",
-			fmt.Sprintf("model %s failed to start: %s", name, s.slots[name].lastError))
+			fmt.Sprintf("model %s failed to start: %s", name, s.health[name].lastError))
 		if err != nil {
 			return err
 		}
 		// a running request keeps its row queued; it isn't failed here
 		s.notifyLocked(ids...)
 	}
+	var cards []Card
+	byID := map[string]*card{}
+	for _, c := range s.cards {
+		v := Card{ID: c.id, State: c.state, Owner: c.owner, Inflight: c.inflight, TurnAt: c.turnAt, Load: c.load}
+		if c.model != nil {
+			v.Model = c.model.Name
+			if c.inflight > 0 || work[v.Model] > 0 || c.state == Starting {
+				c.busyAt = now
+			}
+		}
+		v.BusyAt = c.busyAt
+		cards, byID[c.id] = append(cards, v), c
+	}
+	slots := map[string]int{}
+	for name, m := range s.Cfg.Models {
+		slots[name] = m.Concurrency
+	}
 
-	pol := Policy{MaxTimeslice: s.Cfg.Scheduler.MaxTimeslice.Duration, Idle: s.Cfg.Scheduler.Idle.Duration}
-	for _, a := range Decide(models, now, pol) {
-		sl := s.slots[a.Model]
+	pol := Policy{MaxTimeslice: s.Cfg.Scheduler.MaxTimeslice.Duration, LoadRatio: s.Cfg.Scheduler.LoadRatio,
+		Idle: s.Cfg.Scheduler.Idle.Duration}
+	acts, lines := Decide(cards, flows, slots, s.lines, now, pol)
+	s.lines = lines
+	for _, a := range acts {
+		c := byID[a.Card]
 		switch a.Kind {
 		case Start:
-			s.start(ctx, a.Model, sl)
+			s.start(ctx, c, s.Cfg.Models[a.Model], a.Tenant)
 		case Stop:
-			switch {
-			case sl.state == Draining:
-				s.logf("%s: drained: stopping", a.Model)
-			case pol.Idle > 0 && now.Sub(sl.busyAt) >= pol.Idle:
-				s.logf("%s: idle for %s: stopping", a.Model, now.Sub(sl.busyAt).Round(time.Second))
-			default:
-				s.logf("%s: nothing to do, and a model waits: stopping", a.Model)
+			if c.server == nil {
+				continue // its start failed earlier in this round
 			}
-			srv := sl.server
-			sl.state, sl.server = Down, nil
+			switch {
+			case c.state == Draining:
+				s.logf("%s: drained: stopping", s.on(c, a.Model))
+			case work[a.Model] == 0 && pol.Idle > 0 && now.Sub(c.busyAt) >= pol.Idle:
+				s.logf("%s: idle for %s: stopping", s.on(c, a.Model), now.Sub(c.busyAt).Round(time.Second))
+			default:
+				s.logf("%s: nothing to do, and a model waits: stopping", s.on(c, a.Model))
+			}
+			srv := c.server
+			*c = card{id: c.id, gpu: c.gpu}
 			go srv.Stop()
 		case Drain:
-			s.logf("%s: it has had the card for %s, and a model waits: draining", a.Model, now.Sub(sl.upSince).Round(time.Second))
-			sl.state = Draining
+			if c.state != Up {
+				continue
+			}
+			s.logf("%s: %s's turn is %s old, and another model's turn has come: draining",
+				s.on(c, a.Model), c.owner, now.Sub(c.turnAt).Round(100*time.Millisecond))
+			c.state = Draining
+		case Pass:
+			s.logf("%s: the turn passes from %s to %s", s.on(c, a.Model), c.owner, a.Tenant)
+			c.owner, c.turnAt = a.Tenant, now
 		}
 	}
-	for _, name := range s.Cfg.Names() {
-		if sl := s.slots[name]; sl.state == Up {
-			if err := s.dispatch(ctx, name, sl); err != nil {
+	for _, c := range s.cards {
+		if c.state == Up {
+			if err := s.dispatch(ctx, c); err != nil {
 				return err
 			}
 		}
@@ -247,125 +302,99 @@ func (s *Scheduler) round(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scheduler) failedStart(name string, sl *slot, why string) {
-	sl.startFails++
-	sl.lastError = why
-	s.logf("%s: %s (%d)", name, why, sl.startFails)
-	if sl.startFails >= 2 {
-		sl.brokenAt = time.Now()
+// failed is the end of a turn nobody decided: a load that failed, or a
+// server that died. The card is free; twice and the model is refused for
+// a while.
+func (s *Scheduler) failed(c *card, why string) {
+	name := c.model.Name
+	h := s.health[name]
+	h.startFails++
+	h.lastError = why
+	s.logf("%s: %s (%d)", s.on(c, name), why, h.startFails)
+	if h.startFails >= 2 {
+		h.brokenAt = time.Now()
 		s.logf("%s: refusing its requests for %s", name, s.Cfg.Scheduler.BrokenFor.Duration)
 	}
+	if c.state != Draining { // a draining card's turn ended when it began to drain
+		s.lines.Ended(c.owner, name)
+	}
+	*c = card{id: c.id, gpu: c.gpu}
 }
 
-func (s *Scheduler) start(ctx context.Context, name string, sl *slot) {
-	srv, err := s.NewServer(sl.model)
+func (s *Scheduler) start(ctx context.Context, c *card, m *config.Model, tenant string) {
+	c.model, c.owner, c.state = m, tenant, Starting
+	srv, err := s.NewServer(m, c.gpu)
 	if err != nil {
-		s.failedStart(name, sl, err.Error())
-		sl.startFails = 2
-		sl.brokenAt = time.Now()
+		s.health[m.Name].startFails = 2 // nothing to retry
+		s.failed(c, err.Error())
 		return
 	}
-	sl.state, sl.server = Starting, srv
-	s.logf("%s: starting", name)
+	c.server = srv
+	s.logf("%s: starting (%s's turn)", s.on(c, m.Name), tenant)
 	go func() {
 		t := time.Now()
 		err := srv.Start(ctx)
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if sl.server != srv { // stopped meanwhile
+		if c.server != srv { // stopped meanwhile
 			return
 		}
 		if err != nil {
-			sl.state, sl.server = Down, nil
-			s.failedStart(name, sl, "failed to start: "+err.Error())
+			s.failed(c, "failed to start: "+err.Error())
+			s.Wake()
 			return
 		}
-		sl.state, sl.upSince, sl.busyAt = Up, time.Now(), time.Now()
-		s.logf("%s: up after %s (as %q)", name, time.Since(t).Round(time.Millisecond), srv.UpstreamModel())
+		now := time.Now()
+		c.state, c.upSince, c.turnAt, c.busyAt, c.load = Up, now, now, now, now.Sub(t)
+		s.logf("%s: up after %s (as %q)", s.on(c, m.Name), c.load.Round(time.Millisecond), srv.UpstreamModel())
 		s.Wake()
 	}()
 }
 
-// dispatch sends queued requests up to the model's concurrency, taking
-// turns between clients. A question already being answered isn't asked
+// dispatch sends queued requests up to the model's concurrency, by
+// RoundRobin (policy.go). A question already being answered isn't asked
 // again: its twin waits and gets the same answer.
-func (s *Scheduler) dispatch(ctx context.Context, name string, sl *slot) error {
-	free := sl.model.Concurrency - sl.inflight
+func (s *Scheduler) dispatch(ctx context.Context, c *card) error {
+	name := c.model.Name
+	free := c.model.Concurrency - c.inflight
 	if free <= 0 {
 		return nil
 	}
-	byClient, err := s.Q.Queued(name, free+sl.inflight)
+	inflight := map[string]int{} // by tenant, on every card that has this model
+	for _, r := range s.running {
+		if r.model == name {
+			inflight[r.client]++
+		}
+	}
+	// enough per client that the ones in flight (still queued in the db) can't hide the rest
+	busy := 0
+	for _, n := range inflight {
+		busy += n
+	}
+	byClient, err := s.Q.Queued(name, free+busy)
 	if err != nil {
 		return err
 	}
-	for c, rs := range byClient {
+	for cl, rs := range byClient {
 		var keep []queue.Request
 		for _, r := range rs {
 			if _, busy := s.running[r.ID]; !busy && !s.keys[r.Key] {
 				keep = append(keep, r)
 			}
 		}
-		byClient[c] = keep
+		byClient[cl] = keep
 	}
-	picked, last := RoundRobin(byClient, s.cursor[name], free)
+	picked, last := RoundRobin(byClient, func(r queue.Request) string { return r.Key }, inflight, s.cursor[name], free)
 	if last != "" {
 		s.cursor[name] = last
 	}
 	for _, r := range picked {
-		s.running[r.ID] = run{batch: r.BatchID, key: r.Key}
+		s.running[r.ID] = run{batch: r.BatchID, key: r.Key, client: r.Client, model: name}
 		s.keys[r.Key] = true
-		sl.inflight++
-		go s.execute(ctx, sl, sl.server, r)
+		c.inflight++
+		go s.execute(ctx, c, c.server, r)
 	}
 	return nil
-}
-
-// RoundRobin picks up to n requests, one per client in turn, starting
-// after the client served last; each client's own come in the order given.
-// Two of the picks never share a cache key.
-func RoundRobin(byClient map[string][]queue.Request, after string, n int) ([]queue.Request, string) {
-	clients := make([]string, 0, len(byClient))
-	for c, rs := range byClient {
-		if len(rs) > 0 {
-			clients = append(clients, c)
-		}
-	}
-	if len(clients) == 0 {
-		return nil, ""
-	}
-	sort.Strings(clients)
-	start := sort.SearchStrings(clients, after)
-	if start < len(clients) && clients[start] == after {
-		start++
-	}
-	var picked []queue.Request
-	keys := map[string]bool{}
-	next := map[string]int{}
-	last := ""
-	for len(picked) < n {
-		progressed := false
-		for i := range clients {
-			if len(picked) == n {
-				break
-			}
-			c := clients[(start+i)%len(clients)]
-			for next[c] < len(byClient[c]) {
-				r := byClient[c][next[c]]
-				next[c]++
-				if keys[r.Key] {
-					continue
-				}
-				keys[r.Key] = true
-				picked = append(picked, r)
-				last, progressed = c, true
-				break
-			}
-		}
-		if !progressed {
-			break
-		}
-	}
-	return picked, last
 }
 
 // withModel replaces a body's "model" with the upstream's name.
@@ -378,12 +407,14 @@ func withModel(body []byte, model string) ([]byte, error) {
 	return queue.Marshal(obj)
 }
 
-func (s *Scheduler) execute(ctx context.Context, sl *slot, srv upstream.Server, r queue.Request) {
+func (s *Scheduler) execute(ctx context.Context, c *card, srv upstream.Server, r queue.Request) {
 	defer s.Wake()
 	var done []int64
 	defer func() {
 		s.mu.Lock()
-		sl.inflight--
+		if c.server == srv {
+			c.inflight--
+		}
 		delete(s.running, r.ID)
 		delete(s.keys, r.Key)
 		s.notifyLocked(done...)
@@ -431,7 +462,7 @@ func (s *Scheduler) execute(ctx context.Context, sl *slot, srv upstream.Server, 
 	}
 	done = append(append(done, r.ID), also...)
 	if ok && r.Write {
-		if err := s.Q.Remember(r.Key, r.Model, sl.model.Identity(), r.Endpoint, reply, elapsed); err != nil {
+		if err := s.Q.Remember(r.Key, r.Model, s.Cfg.Models[r.Model].Identity(), r.Endpoint, reply, elapsed); err != nil {
 			s.logf("%s #%d: caching: %v", r.Model, r.ID, err)
 		}
 	}
@@ -482,10 +513,10 @@ func (s *Scheduler) upkeep(now time.Time) error {
 func (s *Scheduler) stopAll() {
 	s.mu.Lock()
 	var ss []upstream.Server
-	for _, sl := range s.slots {
-		if sl.server != nil {
-			ss = append(ss, sl.server)
-			sl.server, sl.state = nil, Down
+	for _, c := range s.cards {
+		if c.server != nil {
+			ss = append(ss, c.server)
+			*c = card{id: c.id, gpu: c.gpu}
 		}
 	}
 	s.mu.Unlock()
@@ -499,12 +530,13 @@ func (s *Scheduler) stopAll() {
 
 // Status is one model's state, for /v1/timeshare/status.
 type Status struct {
-	Model    string `json:"model"`
-	State    string `json:"state"`
-	UpSince  *int64 `json:"up_since"`
-	Inflight int    `json:"in_flight"`
-	Queued   int    `json:"queued"`
-	Broken   string `json:"unavailable,omitempty"`
+	Model    string   `json:"model"`
+	State    string   `json:"state"` // of the card it is furthest along on
+	Cards    []string `json:"cards"` // the cards it is on
+	UpSince  *int64   `json:"up_since"`
+	Inflight int      `json:"in_flight"`
+	Queued   int      `json:"queued"`
+	Broken   string   `json:"unavailable,omitempty"`
 }
 
 func (s *Scheduler) Status() ([]Status, error) {
@@ -517,17 +549,39 @@ func (s *Scheduler) Status() ([]Status, error) {
 	defer s.mu.Unlock()
 	var out []Status
 	for _, n := range s.Cfg.Names() {
-		sl := s.slots[n]
-		st := Status{Model: n, State: sl.state.String(), Inflight: sl.inflight,
-			Queued: counts[n] - sl.inflight}
-		if sl.state == Up || sl.state == Draining {
-			t := sl.upSince.Unix()
-			st.UpSince = &t
+		st := Status{Model: n, State: Down.String(), Cards: []string{}}
+		best := Down
+		for _, c := range s.cards {
+			if c.model == nil || c.model.Name != n {
+				continue
+			}
+			st.Cards = append(st.Cards, c.id)
+			st.Inflight += c.inflight
+			// up, then draining, then starting
+			if rank := map[State]int{Up: 3, Draining: 2, Starting: 1}; rank[c.state] > rank[best] {
+				best = c.state
+			}
+			if c.state == Up || c.state == Draining {
+				if t := c.upSince.Unix(); st.UpSince == nil || t < *st.UpSince {
+					st.UpSince = &t
+				}
+			}
 		}
-		if !sl.brokenAt.IsZero() {
-			st.Broken = sl.lastError
+		st.State = best.String()
+		st.Queued = counts[n] - st.Inflight
+		if h := s.health[n]; !h.brokenAt.IsZero() {
+			st.Broken = h.lastError
 		}
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// on names a model on a card, for the log: just the model when there is
+// only the one card.
+func (s *Scheduler) on(c *card, model string) string {
+	if len(s.cards) == 1 {
+		return model
+	}
+	return model + " on " + c.id
 }
