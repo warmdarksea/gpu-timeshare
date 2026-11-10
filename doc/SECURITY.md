@@ -29,9 +29,10 @@ Each model with `isolation = "unit"` (the default) is a systemd service,
 
 | Setting | Effect |
 |---|---|
-| `User=gtm-NAME`, `Group=gtm-NAME` | A system user for each model. Models cannot read each other's files. Not `DynamicUser`: systemd 262 mounts a `DynamicUser` cache directory `noexec`, and the models compile GPU kernels there and load them. |
+| `DynamicUser=yes`, `User=gtm-NAME` | A user for each model, allocated by systemd while the model runs and in no `/etc/passwd`. Models cannot read each other's files. |
 | `ProtectSystem=strict` | The file system is read-only. |
-| `CacheDirectory=gpu-timeshare-model-cache/NAME` | The one persistent directory it can write. It can run what it writes there (compiled kernels). |
+| `CacheDirectory=gpu-timeshare-model-cache/NAME` | The one persistent directory it can write (under `/var/cache/private`, id-mapped to the model's user). |
+| `ExecPaths=` that directory | It can run what it writes there: the models compile GPU kernels into their cache and load them. systemd 262 mounts a `DynamicUser` cache `noexec` otherwise, and `ExecPaths=` has to name the directory itself, not a parent. |
 | `ReadWritePaths=/run/gpu-timeshare-models` | Where it creates its socket. |
 | `PrivateTmp=true` | Its own `/tmp` and `/var/tmp`. |
 | `ProtectHome=true` | No `/home`, `/root`, `/run/user`. |
@@ -174,8 +175,8 @@ the hardware watchdog.
 `gpu = false`; the test checks these lines):
 
 ```
-user        gtm-b (996)
-groups      gtm-b (995), gpu-timeshare-models (997)
+user        gtm-b (62301)
+groups      gtm-b (62301), gpu-timeshare-models (997)
 capabilities  effective: none
 no_new_privs  yes: setuid files and file capabilities give it nothing
 seccomp       filter, 31 filter(s) (not decoded here)
@@ -189,7 +190,7 @@ made inaccessible: /home, ..., /var/cache/gpu-timeshare, /var/lib/gpu-timeshare
 interfaces: lo
 listening in this namespace: tcp 127.0.0.1:8000
 devices it can open: /dev/full (rw), /dev/null (rw), ..., /dev/zero (rw)
-mounts it can write to: /dev/shm, /run/gpu-timeshare-models, /tmp, /var/cache/gpu-timeshare-model-cache/b, /var/tmp
+mounts it can write to: /dev/shm, /run/gpu-timeshare-models, /tmp, /var/cache/private/gpu-timeshare-model-cache/b, /var/tmp
 /var/lib/gpu-timeshare: ---
 /etc/hostname: r--
 ```

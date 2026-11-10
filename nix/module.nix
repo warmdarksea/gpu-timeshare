@@ -5,8 +5,9 @@
 # than start and stop exactly those units (a polkit rule), so what runs,
 # and how it is sandboxed, is fixed here, not by the service:
 #
-#   - a system user of its own (gtm-NAME), the file system read-only but
-#     for its own cache, no home, no access to gpu-timeshare's state;
+#   - a user of its own (gtm-NAME, a DynamicUser: it exists only while the
+#     model runs), the file system read-only but for its own cache, no
+#     home, no access to gpu-timeshare's state;
 #   - the GPU's device nodes and nothing else (DevicePolicy=closed);
 #   - a network namespace of its own (PrivateNetwork): a loopback no one
 #     else shares and nothing beyond it. It answers on a unix socket only
@@ -52,14 +53,17 @@ let
   socketOf = name: "${socketDir}/${lib.replaceStrings [ "/" ":" ] [ "-" "-" ] name}.sock";
   units = lib.filterAttrs (_: m: m.isolation == "unit") cfg.models;
 
-  # Each unit model's own user, not DynamicUser: systemd (262 at least)
-  # gives a DynamicUser unit's CacheDirectory= an id-mapped mount where the
-  # file system supports one (ZFS, ext4, tmpfs...), and always mounts it
-  # noexec. Triton and torch compile kernels into that cache and dlopen
-  # them, so every vllm model died on its first kernel ("failed to map
-  # segment from shared object"). A static user's directory is chowned
-  # instead. A name that isn't a valid user name, or is too long, becomes
-  # a hash.
+  # Each unit model's user: a DynamicUser named gtm-NAME, allocated while
+  # the unit runs, so no user per model in /etc/passwd. A name that isn't a
+  # valid user name, or is too long, becomes a hash.
+  #
+  # systemd (262 at least) gives a DynamicUser unit's CacheDirectory= an
+  # id-mapped mount where the file system supports one (ZFS, ext4,
+  # tmpfs...), and mounts it noexec. Triton and torch compile kernels into
+  # that cache and dlopen them, so without ExecPaths= on the cache (below)
+  # every vllm model dies on its first kernel ("failed to map segment from
+  # shared object"). ExecPaths= must name the directory itself: on its
+  # parent it doesn't reach the id-mapped mount (tested, systemd 262).
   modelUser = name:
     let
       clean = lib.stringAsChars (c: if builtins.match "[a-z0-9_-]" c != null then c else "-") (lib.toLower name);
@@ -67,9 +71,8 @@ let
     in
     if clean == lib.toLower name && lib.stringLength user <= 31 then user
     else "gtm-${builtins.substring 0 27 (builtins.hashString "sha256" name)}";
-  # not gpu-timeshare-models/: a directory left by a DynamicUser unit is
-  # owned by nobody, and systemd id-maps (noexec) any directory it finds
-  # owned by nobody, whoever runs the unit
+  # not gpu-timeshare-models/, whose directories an older DynamicUser
+  # version may have left behind
   cacheOf = name: "gpu-timeshare-model-cache/${lib.replaceStrings [ "/" ":" ] [ "-" "-" ] name}";
 
   # a unit model on {port} listens here, on its own loopback, and a proxy
@@ -320,11 +323,7 @@ in
     warnings = lib.optional (!loopback && !cfg.tls.enable)
       "services.gpu-timeshare listens on ${cfg.host} without TLS: tokens cross the network in the clear";
 
-    users.users = lib.mapAttrs' (name: _: lib.nameValuePair (modelUser name) {
-      isSystemUser = true;
-      group = modelUser name;
-      description = "gpu-timeshare model ${name}";
-    }) units // {
+    users.users = {
       gpu-timeshare = {
         isSystemUser = true;
         group = "gpu-timeshare";
@@ -333,7 +332,7 @@ in
         extraGroups = [ socketGroup ] ++ lib.optionals hasProcessGpu [ "video" "render" ];
       };
     };
-    users.groups = lib.mapAttrs' (name: _: lib.nameValuePair (modelUser name) { }) units // {
+    users.groups = {
       gpu-timeshare = { };
       ${socketGroup} = { };
     };
@@ -438,12 +437,15 @@ in
           TimeoutStopSec = 60;
           KillMode = "control-group";
 
+          DynamicUser = true;
           User = modelUser name;
           Group = modelUser name;
           SupplementaryGroups = [ socketGroup ];
           RemoveIPC = true;
           UMask = "0007";
           CacheDirectory = cacheOf name;
+          # code it compiles runs from there (see modelUser)
+          ExecPaths = [ "/var/cache/${cacheOf name}" ];
           ReadWritePaths = [ socketDir ];
           InaccessiblePaths = [ "-${stateDir}" "-/var/cache/gpu-timeshare" ];
           PrivateTmp = true;

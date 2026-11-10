@@ -23,8 +23,10 @@ Needs root (the namespaces and /proc of another user's process).
 
 import argparse
 import errno
+import grp
 import json
 import os
+import pwd
 import stat
 import sys
 
@@ -71,7 +73,13 @@ USERS, GROUPS = names("/etc/passwd"), names("/etc/group")
 
 
 def who(i, table):
-    return f"{table.get(i, '?')} ({i})"
+    name = table.get(i)
+    if name is None:  # not in the files: a DynamicUser, known to NSS (nss-systemd)
+        try:
+            name = (pwd.getpwuid(i).pw_name if table is USERS else grp.getgrgid(i).gr_name)
+        except (KeyError, OverflowError):
+            name = "?"
+    return f"{name} ({i})"
 
 
 def status(pid):
