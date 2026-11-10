@@ -44,6 +44,9 @@ structure Card (T M C : Type) where
   busyAt : Nat := 0
   /-- how long the model took to load -/
   load : Nat := 0
+  /-- When it began to load, or to drain. (For the proofs about time only:
+  no rule reads it, and the Go code has no such field.) -/
+  since : Nat := 0
 
 /-- One tenant's queued requests for one model (not the ones in flight). -/
 structure Flow (T M : Type) where
@@ -277,14 +280,14 @@ def World.rule (w : World T M C) : Option (Action T M C × World T M C) :=
   match cards.find? fun p => p.2.st = .down && p.2.next.isSome with
   | some (i, c) =>
     some ({ kind := .start, card := c.id, model := c.next, tenant := c.owner },
-          { w with cards := w.cards.set i { id := c.id, st := .starting, model := c.next, owner := c.owner } })
+          { w with cards := w.cards.set i { id := c.id, st := .starting, model := c.next, owner := c.owner, since := w.now } })
   | none =>
   let free := cards.find? fun p => p.2.st = .down && p.2.next.isNone
   -- [Start] a free card goes to the first claim
   match w.claim, free with
   | some (t, m), some (i, c) =>
     some ({ kind := .start, card := c.id, model := some m, tenant := some t },
-          { w with cards := w.cards.set i { id := c.id, st := .starting, model := some m, owner := some t } })
+          { w with cards := w.cards.set i { id := c.id, st := .starting, model := some m, owner := some t, since := w.now } })
   | _, _ =>
   -- [GiveWay] no card is free and a model is lost: the card idle longest stops
   match (if free.isNone && w.anyLost then w.longestIdle 0 else none) with
@@ -315,7 +318,8 @@ def World.rule (w : World T M C) : Option (Action T M C × World T M C) :=
         (w.heldBy x.1.owner = w.heldBy y.1.owner && x.1.turnAt < y.1.turnAt)), free with
   | some (i, (c, t, m)), none =>
     some ({ kind := .drain, card := c.id, model := c.model, tenant := some t, next := some m },
-          { w with cards := w.cards.set i { c with st := .draining, owner := some t, next := some m }
+          { w with cards := w.cards.set i { c with st := .draining, owner := some t, next := some m, since := w.now }
+
                    lines := w.lines.ended c.owner c.model })
   | _, _ => none
 

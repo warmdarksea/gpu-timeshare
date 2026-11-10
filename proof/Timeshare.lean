@@ -11,3 +11,6 @@ import Timeshare.Proofs.Multi
 import Timeshare.Proofs.MultiRule
 import Timeshare.Proofs.MultiBound
 import Timeshare.Proofs.NoWaste
+import Timeshare.Proofs.MultiTimed
+import Timeshare.Proofs.MultiLast
+import Timeshare.Proofs.MultiWait

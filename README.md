@@ -273,9 +273,11 @@ proofs. For any number of tenants, models and cards: no rule
 stops a card that is answering, no turn is cut short, and a
 round ends within three decisions a card, and when the scheduler decides
 nothing no card is free or idle that a waiting model could have; and at
-most *T*·*k* turns begin that are the waiting tenant's own or begin while
-it holds no card. (Not proved yet for the algorithm as it is now: the
-bound in time; see doc/VERIFICATION.md §8.3.) `nix-build -A tests.lean` checks them and runs the Lean model
+no turn that can be taken is left; and a waiting flow has its model
+started, or a card draining for it, within *T*·*k* turns of
+(drain + load + `max_timeslice`), for any quantum, zero included
+(`mwait_bound`). `nix-build -A tests.lean` checks them and runs the Lean model
+
 against 90,000 rounds of the Go code's own decisions.
 `TestNoStarvation` checks the same things against `Decide` itself in 200
 random worlds of up to three cards.

@@ -66,13 +66,13 @@ inductive RuleEffect (w : World T M C) : Action T M C → World T M C → Prop
   /-- [Start], of a card that drained for somebody -/
   | reserved (i : Nat) (c : Card T M C) : w.cards[i]? = some c → c.st = .down → c.next.isSome = true →
       RuleEffect w { kind := .start, card := c.id, model := c.next, tenant := c.owner }
-        { w with cards := w.cards.set i { id := c.id, st := .starting, model := c.next, owner := c.owner } }
+        { w with cards := w.cards.set i { id := c.id, st := .starting, model := c.next, owner := c.owner, since := w.now } }
   /-- [Start], of a free card -/
   | start (i : Nat) (c : Card T M C) (t : T) (m : M) : w.cards[i]? = some c → c.st = .down →
       c.next = none → w.claim = some (t, m) →
       (∀ d ∈ w.cards, ¬ (d.st = .down ∧ d.next.isSome = true)) →
       RuleEffect w { kind := .start, card := c.id, model := some m, tenant := some t }
-        { w with cards := w.cards.set i { id := c.id, st := .starting, model := some m, owner := some t } }
+        { w with cards := w.cards.set i { id := c.id, st := .starting, model := some m, owner := some t, since := w.now } }
   /-- [GiveWay], [IdleStop] -/
   | stop (i : Nat) (c : Card T M C) (d : Nat) : w.cards[i]? = some c → w.idleFor d c = true →
       RuleEffect w { kind := .stop, card := c.id, model := c.model }
@@ -87,7 +87,7 @@ inductive RuleEffect (w : World T M C) : Action T M C → World T M C → Prop
   | drain (i : Nat) (c : Card T M C) (t : T) (m : M) : w.cards[i]? = some c → w.winner c = some (t, m) →
       some m ≠ c.model →
       RuleEffect w { kind := .drain, card := c.id, model := c.model, tenant := some t, next := some m }
-        { w with cards := w.cards.set i { c with st := .draining, owner := some t, next := some m }
+        { w with cards := w.cards.set i { c with st := .draining, owner := some t, next := some m, since := w.now }
                  lines := w.lines.ended c.owner c.model }
 
 theorem rule_effect {w w' : World T M C} {a} (h : w.rule = some (a, w')) : RuleEffect w a w' := by
@@ -172,12 +172,15 @@ theorem rule_effect {w w' : World T M C} {a} (h : w.rule = some (a, w')) : RuleE
 /-- What a rule may do to a card. -/
 inductive CardStep (w : World T M C) : Card T M C → Card T M C → Prop
   | drained (c) : c.st = .draining → c.inflight = 0 → CardStep w c { id := c.id, owner := c.owner, next := c.next }
-  | reserved (c) : c.st = .down → CardStep w c { id := c.id, st := .starting, model := c.next, owner := c.owner }
-  | start (c t m) : c.st = .down → CardStep w c { id := c.id, st := .starting, model := some m, owner := some t }
+  | reserved (c) : c.st = .down →
+      CardStep w c { id := c.id, st := .starting, model := c.next, owner := c.owner, since := w.now }
+  | start (c t m) : c.st = .down →
+      CardStep w c { id := c.id, st := .starting, model := some m, owner := some t, since := w.now }
   | stop (c d) : w.idleFor d c = true → CardStep w c { id := c.id }
   | pass (c t m) : w.winner c = some (t, m) → CardStep w c { c with owner := some t, turnAt := w.now }
   | drain (c t m) : w.winner c = some (t, m) →
-      CardStep w c { c with st := .draining, owner := some t, next := some m }
+      CardStep w c { c with st := .draining, owner := some t, next := some m, since := w.now }
+
 
 /-- A rule changes one card, by one `CardStep`. -/
 theorem rule_step {w w' : World T M C} {a} (h : w.rule = some (a, w')) :

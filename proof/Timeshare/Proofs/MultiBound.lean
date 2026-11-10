@@ -66,7 +66,7 @@ theorem rule_multi {w w' : World T M C} {a : Action T M C} (hw : MWaiting N t m 
       (by intro v; simp [Card.taken, Card.serving, hst]) (by intro y; simp [Card.has, Card.serving, hst])
     exact ⟨hw', by simp [charged, begins, he]⟩
   | reserved i d hd hst hnext =>
-    obtain ⟨hw', he⟩ := mpot_congr N t m { id := d.id, st := .starting, model := d.next, owner := d.owner } hw hd
+    obtain ⟨hw', he⟩ := mpot_congr N t m { id := d.id, st := .starting, model := d.next, owner := d.owner, since := w.now } hw hd
       (by intro v; simp [Card.taken, Card.serving, hst, hnext]) (by intro y; simp [Card.has, Card.serving, hst])
     have hpend : w.pending = true := by
       unfold World.pending
@@ -77,7 +77,7 @@ theorem rule_multi {w w' : World T M C} {a : Action T M C} (hw : MWaiting N t m 
     have hdt : d.taken = false := by simp [Card.taken, Card.serving, hst, hnext]
     have hxm : x ≠ m := fun hx => hno.1 rfl (by rw [hx])
     obtain ⟨hw', hA, hB, hC⟩ := mpot_start N t m (u := u) (x := x)
-      (c' := { id := d.id, st := .starting, model := some x, owner := some u }) hw hd hdt
+      (c' := { id := d.id, st := .starting, model := some x, owner := some u, since := w.now }) hw hd hdt
       (by simp [Card.taken, Card.serving]) rfl (by simp [Card.has, Card.serving])
       (by simp [Card.has, Card.serving, hxm])
     refine ⟨hw', ?_⟩
@@ -180,7 +180,7 @@ theorem rule_multi {w w' : World T M C} {a : Action T M C} (hw : MWaiting N t m 
     have hi1 : (w.cards.set i { id := d.id })[i]? = some ({ id := d.id } : Card T M C) := by
       simp [hlt]
     obtain ⟨hw2, hA, hB, hC⟩ := mpot_start N t m (u := u) (x := mu)
-      (c' := { d with st := .draining, owner := some u, next := some mu }) hw1 hi1
+      (c' := { d with st := .draining, owner := some u, next := some mu, since := w.now }) hw1 hi1
       (by simp [Card.taken, Card.serving]) (by simp [Card.taken]) rfl
       (by simp [Card.has, Card.serving]) (by simp [Card.has, Card.serving, hmum])
     rw [List.set_set] at hw2 hA hB hC

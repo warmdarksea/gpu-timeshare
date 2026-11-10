@@ -162,10 +162,12 @@ order in which they arrive.
 >
 > unless the flow empties first.
 
-This is what TLC finds true for one and two cards at small sizes (§6.5),
-and what `TestNoStarvation` samples up to three cards. It is **not**
-proved in Lean for the algorithm as it is now: what is proved is the
-count of turns (§8.2), and §8.3 has the plan for the time.
+The *T*·*k* part is **proved in Lean for any number of cards, tenants and
+models** (§8.2, `mwait_bound`): within *T*·*k* turns the flow's model is
+started, or a card begins to drain for it; its own drain and load follow.
+A turn there is *D* + *L* + *Q*: the drain comes first, since a card that
+drains is already its next tenant's. The cap *T*·(*M* − 1) is what TLC
+finds for one and two cards at small sizes (§6.5); it is not proved.
 
 The last *D* + *L* is the flow's own drain (if its model was up and was
 drained with requests still queued) and its own load.
@@ -513,7 +515,9 @@ cards: the three are type parameters.
 `winner`, `claim`, `Lines.join`, `Lines.ended` and the rest, with the same
 names. It is not an abstraction like the TLA+ model. It takes the same
 arguments (cards with their counts and times, flows, slots, lines, the
-time, the policy) and returns the same actions and lines.
+time, the policy) and returns the same actions and lines. (One field of
+a card is the model's alone: `since`, when the card began to load or to
+drain. No rule reads it; the proofs about time do.)
 
 It is executable, and that is how it is tied to the Go code:
 
@@ -596,37 +600,61 @@ are fewer than *K* of those, and a model that leaves a card goes behind
 `mpot_start`, `mpot_pass` and `mpot_congr` say what each kind of change
 to one card does to it, and a drain is an end and a start at once.
 
+**No starvation, on any number of cards, in time** (`Proofs/MultiTimed.lean`,
+`MultiLast.lean`, `MultiWait.lean`). Time is in ticks, and it moves only
+from a state in which a round would decide nothing, as in the TLA+ model
+(the scheduler has its say at every instant). A load takes at most *L*
+ticks, or fails; requests in flight on a draining card end within *D*.
+
+> **`mwait_bound`.** While tenant *t* has requests queued for model *m*,
+> and until *m* is started or a card begins to drain for it, at most
+> ***K*·*N*·(*D* + *L* + *Q*) ticks** go by -- on any number of cards,
+> for any number of tenants and models, whatever else is queued and
+> whatever the model servers do within their limits. *Q* is the longest
+> quantum (`max_timeslice`, or `load_ratio` × *L*) and at least one tick,
+> so a quantum of zero is covered.
+
+The proof is a budget that no step exceeds (`Bud`, `step_inv`): the time
+now, plus the measure `mPot` times the longest turn, plus the time left
+on a card -- on each of *t*'s cards while it holds one, on some card
+while it holds none. Then:
+
+- a turn that begins while *t* holds no card, or is *t*'s own, lowers the
+  measure (`rule_multi`), and so does the turn that takes *t*'s last card
+  (`rule_last`: whoever takes it ranked below an owner with one card, so
+  it held none, and it stands before *t* now, who went to the back);
+- a tick lowers the time left by one, and there is always some left:
+  when the scheduler would decide nothing, every turn old enough to be
+  taken has its owner as the winner, staying (`settled`); but *t* has a
+  lost model, so on its own card it would move (`winner_lost`), and on
+  anybody's card while it holds none it or somebody of rank 0 before it
+  would win, which the owner is not (`winner_first`).
+
+This is the theorem the reserved drains were for (§9, entry 17): with one
+drain at a time it was false.
+
 The build fails on an unfinished proof (`assert_no_sorry`), and
 `tests.lean` fails if a module of `proof/` was not checked.
 
 ### 8.3 What is not proved yet
 
-**1. The bound in time, for the algorithm as it is now.** Before drains
-were reserved (§9, entry 17) there was a proof for one card, `wait_bound`:
-*K*·*N*·(*L* + *Q* + *D*) ticks. It was about the old rule 6 and has been
-taken out with it (`turns_bound` and the progress theorems too). The
-plan for the new rule, for any number of cards:
+**1. The cap *T*·(*M* − 1)** of §4.1. *T*·*k* is proved; the cap is TLC's
+finding at small sizes.
 
-- the budget is the time now, plus `mPot` times the longest turn
-  (*D* + *L* + *Q*: the drain comes first now), plus the time left: while
-  *t* holds a card, on each of its cards; while it holds none, on some
-  card;
-- `settled` and `winner_first` say that at a tick no turn that matters is
-  old: every old turn has a winner other than its owner staying, so a
-  rule would apply;
-- `mturns_bound`'s lemmas say the measure pays for every turn that
-  begins while *t* holds no card or is *t*'s own; one more is needed, for
-  the turn that takes *t*'s last card (the taker held no card and now
-  stands before *t*, so the measure is lower).
+**2. That the flow's own drain and load end.** `mwait_bound` stops when
+the flow's model is started or a card begins to drain for it. That the
+drain takes at most *D* and the load at most *L* are the assumptions of
+the time model, so the model is up within *D* + *L* more; this last step
+is not written as a theorem.
 
-The expected theorem is §4.1's formula for any number of cards, with the
-turn as above. TLC agrees for one and two cards at small sizes (§6.5).
+**3. Fair shares** (§4.4): tested in simulation, not proved.
 
-**2. The cap *T*·(*M* − 1)** of §4.1. Only *T*·*k* is proved, and only in
-turns.
-
-**3. That the Lean model and the Go code agree.** That is a test (§8.1);
+**4. That the Lean model and the Go code agree.** That is a test (§8.1);
 §11 is the plan to make it true by construction.
+
+(An earlier proof for one card, `wait_bound`, was about the rule before
+drains were reserved, §9 entry 17, and went out with it; `mwait_bound`
+covers one card as it does any number.)
 
 ### 8.4 Running it
 
@@ -825,7 +853,8 @@ was not true of several. *How found:* trying to prove a bound in time for
 several cards: `settled` showed that such a tenant's old card implies a
 drain in progress somewhere, and nothing bounded how many. TLC's two-card
 configurations had *D* of 1 or 2 and could not show it; the random
-simulation did not either. *Fix* (commit after `fae0a85`): a card drains
+simulation did not either. *Fix* (`7a5e695`): a card drains
+
 *for* the claim that took it. `Card.Next` (Go), `next` (spec and Lean) is
 the model it will load; its owner is the new tenant from the moment it
 begins to drain; `held` and `placed` count such a card as that tenant's
