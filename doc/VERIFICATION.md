@@ -616,58 +616,177 @@ first time; lake fetches nothing. `Timeshare/Policy.lean` imports nothing,
 because nixpkgs' Mathlib has no objects to link an executable against;
 the proofs import Mathlib and are only type-checked.
 
-## 9. What the checkers found
+## 9. The bug log
 
-The algorithm in §2 is not the first draft. Each of these looked right on
-paper.
+Every defect found in this scheduler, by whatever means, in the order it
+was found. Each entry says what the repository was at the time, what was
+wrong, how it showed, and what the fix was. Add to it; do not tidy it.
 
-Found by TLC:
+About the states: everything up to entry 16 happened in one uncommitted
+working tree on top of commit `4373e4a` (the per-model scheduler:
+`policy.go`'s `Decide` over `[]Model`, `card.go`, `spec/Timeslice.tla`).
+That tree was committed as `6a4b5df` on branch `tenant-turns`. So for
+those entries there is no commit to check out; the draft is described.
+From entry 17 on, entries name commits.
 
-1. **A model that was being served stayed first in its tenant's line.**
-   The draft moved a model to the back when its turn *began*. A model
-   that arrived during the turn joined behind it, and when the turn was
-   over the tenant picked the same model again. TLC: one tenant, two
-   models, the second waits for ever.
-2. **Riders kept their order.** The draft moved a model back only in the
-   line of the tenant whose turn it was. A tenant that had been served
-   during somebody else's turn then picked that model again on its own.
-   TLC: two tenants, three models, a wait past the bound. Now a model that
-   leaves a card goes to the back of every tenant's line.
-3. **Two tenants passed a card between them for ever.** The draft let a
-   tenant stay in preference to moving when the model on the card was
-   earlier in its line. Two tenants on one model then passed the turn
-   back and forth, and a third model of one of them was never loaded.
-   Now a tenant moves if it can.
-4. **Two cards drained for one claim.** With rules in any order, a second
-   card began to drain between the first card's stop and the start on it.
-   Now `Drain` needs every card to be in use.
-5. **The bound was wrong by a turn.** The first formula was *T*·*k* − 1
-   turns. TLC found a tenant whose own turn, on a model with nothing left
-   queued, was running when its next request arrived.
+### 9.1 Found by reading, before any code
 
-A sixth observation changed a rule without being a bug: with two cards, a
-copy could drain one card while a pass on the other would have done, and
-two swaps followed. `Drain` now waits while any `Pass` is possible.
+**1. "Oldest request first" makes the wait grow with other tenants'
+backlogs.** *State:* `4373e4a`; the proposal on the table was: give each
+model a timeslice, and when it ends, swap to the model whose request has
+waited longest. *Defect:* that is first-come-first-served over backlogs.
+Models A and B each hold 10,000 requests from t = 0; a request for C
+arrives at t = 1. A and B alternate until every request older than C's is
+answered. C is not starved, but its wait is the whole backlog, not a
+number of turns. *How found:* working the example by hand. *Fix:* a place
+in line is not the age of a request. Whoever has had a turn goes to the
+back, and newcomers join at the back (§1).
 
-Found while proving in Lean that a round ends:
+**2. Turns per model let a tenant take more by spreading out.** *State:*
+`4373e4a`, the code as it ran: `Decide` gave the card to the waiting
+model that loaded longest ago. *Defect:* a tenant with work on seven
+models had seven turns for each turn of a tenant with one; an interactive
+tenant waited seven timeslices behind one batch. *How found:* by hand,
+from the classify pipeline's seven models. *Fix:* turns belong to
+tenants (§2.1).
 
-6. **A timeslice of zero made a round endless.** With `max_timeslice = "0"`
-   and two tenants on one model, the turn passed from one to the other and
-   back without time moving, and Go's `Decide` did not return: the
-   scheduler would have hung with its lock held. The ladder of §8.2 has no
-   step down for a pass unless the new turn is too young to be taken. Now
-   a turn that began this instant can't be taken
-   (`TestZeroTimeslice`). TLC could not have found this: the spec's clock
-   made the timeslice at least one tick, which is now an explicit
-   `ASSUME`.
+**3. The first tenant-fair proposal starved flows.** *State:* `4373e4a`
+plus `tmp/scheduling_plan1.md` in the parent repository (virtual time per
+tenant; swap when the tenant furthest behind has no work on the loaded
+model and everybody being served is Δ ahead of it). *Defect:* a tenant
+being served on the loaded model is never the one furthest behind, so its
+requests for *another* model are never the reason for a swap. Tenants are
+not starved; flows are. *How found:* by reading the swap rule against a
+tenant with two models. *Fix:* that design was dropped; each tenant keeps
+a line of its own models (§1), and a tenant with a lost model moves to it
+when its turn comes.
 
-Found while writing down what a model server may do, for the bound:
+### 9.2 Found by TLC
 
-7. **A server that died while draining sent its tenant to the back
-   twice.** The turn ended when the card began to drain, and the driver's
-   `failed` ended it again. One place in the line, once; but the measure
-   of §8.2 could not be shown to hold through it, and it was wrong. The
-   driver now ends a turn once.
+For these the state was: `spec/Turns.tla` existed as a draft and
+`policy.go` had not been rewritten yet (entries 4 to 7), or had (entry 8).
+The configurations are the constants TLC ran with: tenants, models, cards,
+then `MaxTimeslice`, `MaxLoad`, `MaxDrain`.
+
+**4. A model that was being served stayed first in its tenant's line.**
+*Draft:* `Start` moved the tenant and its model to the back when the turn
+*began*; `Pick` was the first model in the tenant's line among the one on
+the card and those on no card. *Config:* 2 tenants, 2 models, 1 card; 2,
+1, 1. *Trace:* t1 queues b; b starts (the line is `<<b>>`, so moving b to
+the back does nothing); t1 queues a, which joins behind b: `<<b, a>>`.
+When the turn is old, t1's first pick is b, which is on the card: stay.
+For ever. `Bounded` is violated with `wait` growing without limit while
+only t1 is active. *Fix (first attempt):* the owner moves if it can.
+Entry 6 replaced it.
+
+**5. Riders kept their order.** *Draft:* as entry 4 with its fix; a model
+went to the back only in the line of the tenant whose turn it was.
+*Config:* 2 tenants, 3 models, 1 card; 2, 1, 1. *Trace:* t1 has
+`<<b, c, a>>`. t1's turn on b; t2's turn on c, during which t1's requests
+for c are answered too, but c stays second in t1's line; t1's next turn
+picks b again (first lost), then c, and a waits past the bound of that
+day, (*T*·*M* − 1) turns. *Fix:* a model that leaves a card goes to the
+back of every tenant's line, and nothing moves when a turn begins
+(`Ended` in the spec, `Lines.Ended` in Go).
+
+**6. Two tenants passed a card between them for ever.** *Draft:* with
+entry 5's fix; `Pick` for a tenant that is not the owner still preferred
+the model on the card when it stood earlier in its line. *Config:* 2
+tenants, 2 models, 1 card; 2, 2, 2. *Trace:* t1 and t2 both queue b, t1
+also a; t1's line is `<<b, a>>`. The turn passes t1 → t2 → t1 → ...: each
+time the winner is the one who is not the owner, and its pick is b. Model
+a is never loaded. *Fix:* a tenant moves if it can: `Pick` is its first
+lost model, and only if it has none the model on the card.
+
+**7. Two cards drained for one claim.** *Draft:* with entry 6's fix;
+`Drain` was allowed whenever no card was draining. *Config:* 2 tenants, 2
+models, 2 cards; 2, 1, 1. *Trace:* card c1 drains and is stopped
+(`Drained`); before `Start` puts the claimant's model on it, `Drain` fires
+on c2 for the same claim, since no card is draining at that moment.
+`Settles` (a round is at most 4 decisions, as it then was) is violated.
+*Fix:* `Drain` also needs every card to be in use. In Go, `[Start]` is
+tried before `[Drain]`, and the guard is there as well.
+
+**8. The bound was wrong by a turn.** *State:* the Go rewrite existed and
+`TestNoStarvation` passed with the formula min(*T*·*k* − 1, *T*·(*M* − 1))
+turns. *Config:* 2 tenants, 3 models, 1 card, the watched tenant limited
+to one queued model (`K` = 1); 3, 1, 2. *Trace:* t1 owns the card with
+m2, all of whose requests are in flight (nothing queued); t1 queues m1;
+t2 queues m3. t1's turn runs out (3), drains (2), t2's turn (1 + 3 + 2),
+m1 loads (1): 12 ticks, and the formula said 9. *Defect:* the argument
+forgot the turn that is running when the wait begins, which can be the
+waiting tenant's own. *Fix:* the formula, to *T*·*k*; the algorithm was
+right. The random simulation had not found it in 200 worlds.
+
+**9. (Not a defect.) A copy drained a card where a pass would have
+done.** *Config:* 2 tenants, 2 models, 2 cards. *Trace:* t1 holds both
+cards (a and b); a is short; t2 has requests for a. On b's old turn t2
+wins with a copy of a, so b drains for a second a, and then t1's b, now on
+no card, takes the first card from a: two swaps where passing the turn on
+the first card to t2 would have needed none. *Change:* `Drain` waits
+while any `Pass` is possible.
+
+### 9.3 Found by the Go tests
+
+**10. The simulator invented a request in flight.** *State:* first run of
+the new `policy_test.go`. *Symptom:* `TestNoStarvation`: "stops a card
+with 1 in flight". *Defect:* in the test, not the scheduler: `sim` set
+`Inflight = 1` on every `Drain`, but `Decide` drains and stops a card
+with nothing in flight in one round. *Fix:* the simulator leaves
+`Inflight` alone.
+
+**11. The log named a card nobody had configured.** *State:* the driver
+rewritten for several cards. *Symptom:* the end-to-end test
+`TestIdleUnloadKillsTheGroup` looked for "b: idle for" and found
+"b on card0: idle for". *Fix:* with one card the log names only the model
+(`Scheduler.on`).
+
+**12. "Its turn is 0s old."** *State:* `TestTurns` just written, with
+`max_timeslice = "400ms"`. *Symptom:* the drain line in the log said the
+turn was 0s old. *Defect:* the age was rounded to a second. *Fix:* rounded
+to 100 ms.
+
+### 9.4 Found with the Lean model
+
+**13. (Not a defect.) GiveWay's "no card is free" guard is redundant.**
+*State:* `proof/Timeshare/Policy.lean` just written and agreeing with Go
+on 90,000 rounds. *How found:* changing the model to see whether the
+differential test would notice; dropping that guard changed nothing.
+With a free card and a lost model, `[Start]` always fires first. The
+guard stays, for the reader.
+
+**14. A timeslice of zero made a round endless.** *State:* the Lean model
+agreed with Go; the proof that a round ends (`Proofs/Settles.lean`) was
+being written. *Defect:* with `max_timeslice = "0"` and two tenants with
+requests for one model, `[Pass]` gave the turn to the other tenant with a
+turn age of zero, which was at once old enough to pass back. Go's
+`Decide` loops `for { rule() }` and never returned; the driver calls it
+with its mutex held, so the whole scheduler would have hung. *How found:*
+the proof needs every rule to move a card down a ladder, and there was no
+step down for a pass. Reproduced in Go as `TestZeroTimeslice` (it timed
+out). TLC could not see it: in the spec a new turn's clock is 0 and
+`MaxTimeslice` was at least 1 in every configuration. *Fix:* a turn that
+began this instant cannot be taken (`winner` in Go and Lean:
+`age < quantum || age <= 0`); the spec states `ASSUME MaxTimeslice >= 1`.
+
+**15. A server that died while draining sent its tenant to the back
+twice.** *State:* `turns_bound` being set up; `Env` (what a model server
+may do between rounds) being written. *Defect:* `Decide` ends a turn when
+the card begins to drain (`Lines.Ended`); if the server then died, the
+driver's `failed` called `Lines.Ended` again, moving the tenant behind
+whoever had joined in between. One place in line, once per such death.
+*How found:* the measure of §8.2 could not be shown to hold through that
+step. *Fix:* `failed` ends a turn only if the card was not draining.
+
+**16. (Process.) Eleven model checkers at once.** *State:* the survey of
+longest waits (§6.5). *Symptom:* the session was killed for memory.
+*Cause:* TLC's JVM takes a quarter of the machine each by default, and
+its state files were going to a tmpfs. *Fix:* `JAVA_TOOL_OPTIONS=-Xmx4g`,
+a few at a time, `-metadir` on disk (§6.6).
+
+### 9.5 After `6a4b5df`
+
+(Nothing yet.)
 
 ## 10. When you change the algorithm
 

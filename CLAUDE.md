@@ -49,6 +49,10 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
   (VERIFICATION.md, section 9), and proving in Lean that a round ends
   found that `max_timeslice = "0"` hung `Decide`; don't trust a change
   they haven't seen.
+- Every defect found in the scheduler, by any means, gets an entry in the
+  bug log (VERIFICATION.md §9): the state of the repository then, what
+  was wrong, how it showed, the fix (the user's rule: they are useful
+  later).
 - Turns belong to tenants, not models (the user's call): a tenant must not
   get more of the cards by spreading over models or by queueing more.
 - One model per card at a time, deliberately: two busy models sharing a
