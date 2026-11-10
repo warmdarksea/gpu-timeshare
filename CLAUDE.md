@@ -10,7 +10,9 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
   file, its types included (the user wants it in one place, to read beside
   the English and the TLA+): `Decide` (which model on which card, whose
   turn; pure: cards, flows and lines in, actions and lines out) and
-  `RoundRobin` (which requests a model that is up gets). `spec/Turns.tla`
+  `RoundRobin` (which requests a model that is up gets; the turn's owner
+  keeps half the slots, `Owner`; also in Lean, `roundRobin`, and
+  `TestCases` holds the two together). `spec/Turns.tla`
   is `Decide`'s TLA+ model. `driver.go` applies them: one `card` per GPU,
   the lines kept in memory, never two requests with the same cache key at
   once.

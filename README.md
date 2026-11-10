@@ -22,7 +22,9 @@ batch.
   drains and leaves -- or, if that tenant wants the same model, nothing is
   swapped at all. A TLA+ model of the scheduler, checked by TLC, bounds
   how long any request's model can be kept off the cards (see
-  [The scheduler](#the-scheduler)). Within a model, free slots go to the
+  [The scheduler](#the-scheduler)). Within a model, the tenant whose
+  turn it is keeps half the card's slots while it has requests for them;
+  the other free slots go to the
   tenant with the fewest requests in flight, and each tenant's requests go
   oldest first (single requests ahead of batch lines: someone is holding a
   connection open for those).
