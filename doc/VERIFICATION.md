@@ -640,6 +640,18 @@ while it holds none. Then:
 This is the theorem the reserved drains were for (§9, entry 17): with one
 drain at a time it was false.
 
+**The last step** (`Proofs/MultiUp.lean`).
+
+> **`up_bound`.** Once a card has a model coming -- it drains for it, has
+> drained for it, or is loading it -- the model is up within ***D* + *L***
+> ticks, unless its load fails. No rule takes such a card for anything
+> else (`rule_coming`).
+
+Together: a flow with queued requests has its model up within
+*K*·*N*·(*D* + *L* + *Q*) + *D* + *L* ticks, on any number of cards, if
+its load does not fail. That is §4.1's formula with *T*·*k* turns.
+
+
 The build fails on an unfinished proof (`assert_no_sorry`), and
 `tests.lean` fails if a module of `proof/` was not checked.
 
@@ -648,15 +660,9 @@ The build fails on an unfinished proof (`assert_no_sorry`), and
 **1. The cap *T*·(*M* − 1)** of §4.1. *T*·*k* is proved; the cap is TLC's
 finding at small sizes.
 
-**2. That the flow's own drain and load end.** `mwait_bound` stops when
-the flow's model is started or a card begins to drain for it. That the
-drain takes at most *D* and the load at most *L* are the assumptions of
-the time model, so the model is up within *D* + *L* more; this last step
-is not written as a theorem.
+**2. Fair shares** (§4.4): tested in simulation, not proved.
 
-**3. Fair shares** (§4.4): tested in simulation, not proved.
-
-**4. That the Lean model and the Go code agree.** That is a test (§8.1);
+**3. That the Lean model and the Go code agree.** That is a test (§8.1);
 §11 is the plan to make it true by construction.
 
 (An earlier proof for one card, `wait_bound`, was about the rule before

@@ -14,3 +14,4 @@ import Timeshare.Proofs.NoWaste
 import Timeshare.Proofs.MultiTimed
 import Timeshare.Proofs.MultiLast
 import Timeshare.Proofs.MultiWait
+import Timeshare.Proofs.MultiUp
