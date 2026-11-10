@@ -179,7 +179,9 @@ func serve(args []string) error {
 		defer cancel()
 		srv.Shutdown(sctx)
 	}()
-	log.Printf("serving %d model(s) on %s://%s (state in %s)", len(cfg.Models), scheme, ln.Addr(), cfg.StateDir)
+	log.Printf("serving %d model(s) on %s://%s (state in %s; the scheduler is the %s one)", len(cfg.Models), scheme,
+		ln.Addr(), cfg.StateDir, sched.Engine)
+
 	if scheme == "https" {
 		err = srv.ServeTLS(ln, "", "")
 	} else {

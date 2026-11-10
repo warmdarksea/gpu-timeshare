@@ -19,78 +19,13 @@ One case:
 
 (It imports only the model: Mathlib has no objects to link against.)
 -/
-import Timeshare.Policy
+import Timeshare.Text
 
-open Timeshare
-
-abbrev W := World String String String
-
-structure Case where
-  now : Nat := 0
-  pol : Policy := { maxTimeslice := 0 }
-  cards : List (Card String String String) := []
-  flows : List (Flow String String) := []
-  slots : List (String × Nat) := []
-  lines : List (String × List String) := []
-  acts : List String := []
-  out : List (String × List String) := []
-
-def opt (s : String) : Option String := if s = "-" then none else some s
-def unopt : Option String → String
-  | some s => s
-  | none => "-"
-
-def parseSt : String → St
-  | "starting" => .starting
-  | "up" => .up
-  | "draining" => .draining
-  | _ => .down
-
-def showKind : Kind → String
-  | .start => "start"
-  | .stop => "stop"
-  | .drain => "drain"
-  | .pass => "pass"
-
-def showAct (a : Action String String String) : String :=
-  s!"{showKind a.kind} {a.card} {unopt a.model} {unopt a.tenant} {unopt a.next}"
-
-def toLines (l : List (String × List String)) : Lines String String :=
-  { tenants := l.map (·.1)
-    models := fun t => match l.find? (·.1 = t) with
-      | some p => p.2
-      | none => [] }
-
-def fromLines (l : Lines String String) : List (String × List String) :=
-  l.tenants.map fun t => (t, l.models t)
-
-/-- One line of the file into the case being read. -/
-def Case.add (c : Case) (ws : List String) : Except String Case :=
-  match ws with
-  | ["case", now, q, r, i] =>
-    pure { c with now := now.toNat!, pol := { maxTimeslice := q.toNat!, loadRatio := r.toNat!, idle := i.toNat! } }
-  | ["card", id, st, m, o, nx, infl, turn, busy, load] =>
-    let card : Card String String String :=
-      { id := id, st := parseSt st, model := opt m, owner := opt o, next := opt nx, inflight := infl.toNat!,
-        turnAt := turn.toNat!, busyAt := busy.toNat!, load := load.toNat! }
-    pure { c with cards := c.cards ++ [card] }
-  | ["flow", t, m, n, old] =>
-    pure { c with flows := c.flows ++ [{ tenant := t, model := m, queued := n.toNat!, oldest := old.toNat! }] }
-  | ["slot", m, n] => pure { c with slots := c.slots ++ [(m, n.toNat!)] }
-  | "line" :: t :: ms => pure { c with lines := c.lines ++ [(t, ms)] }
-  | ["act", k, card, m, t, nx] => pure { c with acts := c.acts ++ [s!"{k} {card} {m} {t} {nx}"] }
-
-  | "out" :: t :: ms => pure { c with out := c.out ++ [(t, ms)] }
-  | _ => throw ("can't read: " ++ " ".intercalate ws)
+open Timeshare Timeshare.Text
 
 /-- What Lean decides for the case, and whether Go decided the same. -/
-def Case.check (c : Case) : Option String :=
-  let slots (m : String) : Nat := match c.slots.find? (·.1 = m) with
-    | some p => p.2
-    | none => 0
-  let (as, l) := decide c.cards c.flows slots (toLines c.lines) c.now c.pol
-  let acts := as.map showAct
-  let out := fromLines l
+def check (c : Case) : Option String :=
+  let (acts, out) := c.decide
   if acts = c.acts ∧ out = c.out then none
   else some s!"at {c.now}: go decided {c.acts}, lines {c.out}; lean decided {acts}, lines {out}"
 
@@ -105,7 +40,7 @@ def main (args : List String) : IO UInt32 := do
     if ws = ["end"] then
       n := n + 1
       acts := acts + cur.acts.length
-      if let some why := cur.check then
+      if let some why := check cur then
         bad := bad + 1
         if bad ≤ 5 then IO.eprintln s!"case {n} {why}"
       cur := {}

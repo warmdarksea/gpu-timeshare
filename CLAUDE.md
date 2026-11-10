@@ -91,6 +91,10 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 shell-script systemctl.
 `nix-build -A tests.tla`: TLC on the scheduler's model (a minute or two;
 `spec/big.cfg` by hand takes several).
+`nix-build -A lean` is gpu-timeshare with the Lean model as its scheduler
+(`-tags leansched`, cgo, `internal/sched/lean.go`); the same Go tests run
+with it deciding, and `TestLeanAgrees` holds it to `Decide`. The ordinary
+build stays cgo-free.
 `nix-build -A proof` type-checks the Lean proofs; `nix-build -A tests.lean`
 also runs the Lean model on every round `TestCases` writes (seconds, once
 Mathlib is in the store: 1.6 GB).

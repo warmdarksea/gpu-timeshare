@@ -77,7 +77,48 @@ let
         leanDeps = [ pkgs.leanPackages.mathlib ];
         meta.mainProgram = "timeshare-check";
       };
+      # gpu-timeshare with the Lean model as its scheduler: the model's static
+      # library (libScheduler.a, from `proof`) linked in through cgo, with
+      # Lean's runtime, so that the function the theorems are about is the one
+      # that runs (internal/sched/lean.go). The tests are the same, with the
+      # Lean scheduler deciding, and TestLeanAgrees holds it to Decide.
+      lean = pkgs.buildGoModule {
+        pname = "gpu-timeshare-lean";
+        inherit (gpu-timeshare) version src vendorHash;
+        subPackages = [ "cmd/gpu-timeshare" ];
+        tags = [ "leansched" ];
+        buildInputs = [ pkgs.gmp pkgs.libuv pkgs.stdenv.cc.cc.lib ];
+        env.CGO_ENABLED = "1";
+        env.CGO_CFLAGS = "-I${pkgs.leanPackages.lean4}/include";
+        env.CGO_LDFLAGS = lib.concatStringsSep " " [
+          "${gpu-timeshare.proof}/.lake/build/lib/libtimeshare_x2dmodel_Scheduler.a"
+          "-L${pkgs.leanPackages.lean4}/lib/lean"
+          "-lInit" "-lleanrt" "-lstdc++" "-lgmp" "-luv" "-lm" "-ldl" "-lpthread"
+          # the test binaries are linked outside the wrapper's reach
+          "-Wl,-rpath,${lib.getLib pkgs.gmp}/lib"
+          "-Wl,-rpath,${lib.getLib pkgs.libuv}/lib"
+          "-Wl,-rpath,${pkgs.stdenv.cc.cc.lib}/lib"
+
+        ];
+        # (the test binaries, and the stub the tests build, are linked outside
+        # the wrapper that gives the installed one its rpath)
+        checkPhase = ''
+          runHook preCheck
+          export LD_LIBRARY_PATH=${lib.makeLibraryPath [ pkgs.gmp pkgs.libuv pkgs.stdenv.cc.cc.lib ]}
+          go test -tags leansched ./...
+          unset LD_LIBRARY_PATH
+          runHook postCheck
+        '';
+        doInstallCheck = true;
+        installCheckPhase = ''
+          $out/bin/gpu-timeshare help > /dev/null 2>&1 || $out/bin/gpu-timeshare --help > /dev/null 2>&1 || {
+            $out/bin/gpu-timeshare help; exit 1; }
+        '';
+        meta = gpu-timeshare.meta;
+
+      };
       # every round of a few hundred simulated worlds: what Go's Decide was
+
       # given and what it answered (internal/sched/cases_test.go)
       cases = gpu-timeshare.overrideAttrs (old: {
         pname = "gpu-timeshare-cases";

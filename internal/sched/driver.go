@@ -259,7 +259,7 @@ func (s *Scheduler) round(ctx context.Context) error {
 
 	pol := Policy{MaxTimeslice: s.Cfg.Scheduler.MaxTimeslice.Duration, LoadRatio: s.Cfg.Scheduler.LoadRatio,
 		Idle: s.Cfg.Scheduler.Idle.Duration}
-	acts, lines := Decide(cards, flows, slots, s.lines, now, pol)
+	acts, lines := decideRound(cards, flows, slots, s.lines, now, pol)
 	s.lines = lines
 	for _, a := range acts {
 		c := byID[a.Card]

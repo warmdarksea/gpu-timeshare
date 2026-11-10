@@ -328,6 +328,7 @@ nix-build                    # gpu-timeshare; the go tests run in the build (-A 
 nix-build -A tests.nixos     # VM: the module, sandboxed units, the OpenAI SDK over TLS
 nix-build -A tests.tla       # TLC: the scheduler's model starves no one (doc/VERIFICATION.md)
 nix-build -A tests.lean      # Lean: the proofs type-check, and the Lean model decides as the Go code does
+nix-build -A lean            # gpu-timeshare with the Lean model as its scheduler (linked in through cgo); same tests
 go test ./...                # the same go tests, no nix needed
 ```
 
