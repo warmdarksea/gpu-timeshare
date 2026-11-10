@@ -1,7 +1,8 @@
 # gpu-timeshare
 
 GPUs, many models, many tenants, the OpenAI API in front (README.md says what and
-why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
+why). Go, with cgo for one thing (the scheduler is the Lean model, linked
+in), `module gpu-timeshare`; packaged by `default.nix`
 (not a flake), with a NixOS module in `nix/module.nix`.
 
 ## Layout
@@ -93,10 +94,15 @@ why). Go, cgo off, `module gpu-timeshare`; packaged by `default.nix`
 shell-script systemctl.
 `nix-build -A tests.tla`: TLC on the scheduler's model (a minute or two;
 `spec/big.cfg` by hand takes several).
-`nix-build -A lean` is gpu-timeshare with the Lean model as its scheduler
-(`-tags leansched`, cgo, `internal/sched/lean.go`); the same Go tests run
-with it deciding, and `TestLeanAgrees` holds it to `Decide`. The ordinary
-build stays cgo-free.
+The scheduler that runs is the Lean model (the user's call, 2026-11-10: the
+Go-only build is retired). `internal/sched/lean.go` links `libscheduler.a`
+(`-A scheduler`: Policy.lean + Text.lean through Lean and cc, no Mathlib,
+so a deployment never builds the proofs) and the driver calls `DecideLean`
+and `RoundRobinLean`. `Decide` and `RoundRobin` in `policy.go` stay as the
+page to read and as what `TestLeanAgrees` and `TestLeanRoundRobinAgrees`
+compare with: keep them in step. `go test` needs the library, so run it in
+`nix-shell`. A caller must not pass its own `pkgs`: the Lean and Mathlib
+the proofs are checked with are the pin's.
 `nix-build -A proof` type-checks the Lean proofs; `nix-build -A tests.lean`
 also runs the Lean model on every round `TestCases` writes (seconds, once
 Mathlib is in the store: 1.6 GB).

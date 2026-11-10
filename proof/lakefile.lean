@@ -8,9 +8,9 @@ package «timeshare-model»
 require "leanprover-community" / "mathlib" @ git "main"
 
 -- The scheduler itself: the model (Timeshare.Policy, which imports nothing)
--- and its text interface. Built as a static library, libScheduler.a, that a
--- program in another language links (the Go program does, with
--- `-tags leansched`): `timeshare_decide` is `Decide`.
+-- and its text interface, which `timeshare-check` links. (The Go program
+-- links the same two files as libscheduler.a, which default.nix builds
+-- without lake and without Mathlib: `timeshare_decide` is `Decide`.)
 @[default_target]
 lean_lib Scheduler where
   globs := #[.one `Timeshare.Policy, .one `Timeshare.Text]

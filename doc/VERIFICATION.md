@@ -722,14 +722,13 @@ finding at small sizes.
 **2. Shares of the card over time** (§4.4, third statement). What is
 proved is the owner's half, slot by slot. That turns are equal in number
 over a long run, that cards are divided to within one, and the figure
-1/(2·*T*) that follows from them are tested or argued, not proved. (In
-the `lean` build the scheduler is the Lean model, but `RoundRobin` is
-still Go's: the Lean `roundRobin` is proved about and tested against it,
-not linked in.)
+1/(2·*T*) that follows from them are tested or argued, not proved. (The
+Lean `roundRobin` is the one that runs, as `decide` is: §11.)
 
 **3. That the Lean model and the Go code agree.** That is a test (§8.1).
-In the `lean` build it does not need to be true: the Lean model decides
-(§11), and what is unproved there is the text interface around it.
+It does not need to be true for the program to be right: the Lean model
+decides (§11), and what is unproved there is the text interface around
+it. The test keeps `policy.go` an honest page to read.
 
 
 (An earlier proof for one card, `wait_bound`, was about the rule before
@@ -969,63 +968,73 @@ made a rider wait a whole turn, and was rejected for that.)
 
 ## 10. When you change the algorithm
 
-
 Change `policy.go`, `spec/Turns.tla`, `proof/Timeshare/Policy.lean` and §2
 here together, rule for rule. Then run `go test ./internal/sched/`,
 `nix-build -A tests.tla` and `nix-build -A tests.lean`. If the change
 touches a bound, find the new longest wait the way §6.5 does (lower
 `MaxWait` until `Bounded` breaks) before you write the formula down.
 
-## 11. The proved code as the running code
+## 11. The proved code is the running code
 
-`policy.go` is held to the Lean model by a test (§8.1), not by
-construction. There is a second build in which the Lean model *is* the
-scheduler:
-
-```
-nix-build -A lean        # gpu-timeshare, with the Lean model deciding
-```
+The scheduler gpu-timeshare runs is the Lean model. `Decide` and
+`RoundRobin` in `policy.go` are the same algorithm in Go: the page to read
+beside §2 and the TLA+, and what the tests compare the Lean functions
+with. The driver calls neither. (Until 2026-11-10 there were two builds,
+and the Go functions decided in the default one. That build is gone.)
 
 How it is put together:
 
 - `proof/Timeshare/Policy.lean` (the model the theorems are about) and
-  `proof/Timeshare/Text.lean` (its arguments and answer as text) are one
-  lake library, `Scheduler`, built as a static library
-  (`libtimeshare_x2dmodel_Scheduler.a`). Lean compiles them to C itself.
-  `Text.lean` exports one function, `timeshare_decide`: a round as text
-  in, the actions and the lines as text out.
-- `internal/sched/lean.go` (build tag `leansched`) links that library and
-  Lean's runtime through cgo, and `DecideLean` calls it: it writes
-  `Decide`'s arguments as the text of §8.1, and reads the answer. The
-  driver calls `decideRound`, which is `DecideLean` in this build and
-  `Decide` in the ordinary one. The log says which at start-up ("the
-  scheduler is the lean one").
+  `proof/Timeshare/Text.lean` (its arguments and answers as text) import
+  nothing. `nix-build -A scheduler` has Lean compile them to C and makes
+  `libscheduler.a` of the two objects. It needs Lean and not Mathlib, so
+  a machine that only runs gpu-timeshare never builds the proofs (no
+  binary cache has this Mathlib; building it takes a long time).
+  `Text.lean` exports two functions: `timeshare_decide` (a round as text
+  in, the actions and the lines as text out) and `timeshare_roundrobin`
+  (a model's queued requests in, the picks out).
+- `internal/sched/lean.go` links that library and Lean's runtime through
+  cgo. `DecideLean` writes `Decide`'s arguments as the text of §8.1 and
+  reads the answer; `RoundRobinLean` does the same for `RoundRobin`. The
+  log says so at start-up ("the scheduler is the lean one").
 - All of Lean's calls are made by one goroutine locked to its thread,
   which the runtime needs.
+- `nix-build -A proof` checks the theorems against the same two files.
+  Nothing in the build of the binary waits for it: run it (or `-A
+  tests.lean`, which needs it) before a change to `Policy.lean` leaves
+  the machine it was written on.
 
-What is and is not proved in that build:
+What is and is not proved:
 
-- The function that decides is the one `mwait_bound`, `settled` and the
-  rest are about. Nothing stands between the theorems and the decisions
-  but Lean's compiler and runtime.
+- The functions that decide are the ones `mwait_bound`, `settled`,
+  `step_owner` and the rest are about. Nothing stands between the
+  theorems and the decisions but Lean's compiler and runtime.
 - Not proved: `lean.go` (the text going in and coming out) and
   `Text.lean`'s parsing; the driver, which applies the decisions and is
   the model servers' `Env` only by reading; and that the real loads and
   requests keep to *L* and *D*.
-- `TestLeanAgrees` (in that build) checks `DecideLean` against `Decide`
-  on every round of 60 simulated worlds, with fractional `load_ratio`s;
-  and every other Go test, the end-to-end ones included, runs with the
-  Lean scheduler deciding.
+- `TestLeanAgrees` checks `DecideLean` against `Decide` on every round of
+  60 simulated worlds, with fractional `load_ratio`s, and
+  `TestLeanRoundRobinAgrees` checks `RoundRobinLean` against `RoundRobin`
+  on 5,000 calls; every other Go test, the end-to-end ones and the VM
+  included, runs with the Lean scheduler deciding.
 
-Two things the text cannot carry are handled on the Go side: a
-`load_ratio` that is not a whole number (each card's load is multiplied
-before it goes in, as `Decide`'s quantum has it), and a name with a space
-in it (that round is left to `Decide`; config names cannot have one, a
-client's name could).
+What the text cannot carry is handled on the Go side:
 
-What it costs: the binary is no longer static (`CGO_ENABLED=1`; it needs
-libgmp, libuv and libstdc++ at run time, which nix gives it), it carries
-Lean's runtime, and each round is a string built, parsed, and parsed
-back. The ordinary build (`nix-build`) is unchanged: Go's `Decide`,
-static, no cgo. Which one a deployment runs is a choice of package
-(`services.gpu-timeshare.package`).
+- a `load_ratio` that is not a whole number: each card's load is
+  multiplied before it goes in, as `Decide`'s quantum has it;
+- in `RoundRobinLean`, names: the model is handed each tenant's place in
+  the order of their names, and each key's place of first appearance, so
+  any name will do. A tenant served last that has nothing queued now is
+  stood for by the tenant before its place, which starts the round at the
+  same tenant;
+- in `DecideLean`, a name with a space in it: that round is left to Go's
+  `Decide`. Config names cannot have one; a client's name could. This is
+  the one place the Go algorithm still decides anything.
+
+What it costs: the binary is not static (`CGO_ENABLED=1`; it needs libgmp,
+libuv and libstdc++ at run time, which nix gives it: 35 MB of closure with
+glibc), it carries Lean's runtime, `go test` needs the library (so: nix,
+or `CGO_CFLAGS`/`CGO_LDFLAGS` set as `default.nix` sets them), and each
+call is a string built, parsed, and parsed back. And the package is tied
+to one Lean: `default.nix`'s own nixpkgs pin, not the caller's.

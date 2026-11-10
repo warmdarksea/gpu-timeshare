@@ -1,5 +1,3 @@
-//go:build leansched
-
 package sched
 
 import (
@@ -45,4 +43,39 @@ func TestLeanAgrees(t *testing.T) {
 		}
 	}
 	t.Logf("%d rounds", rounds)
+}
+
+// And it gives a model's free slots to the requests RoundRobin does: names
+// with spaces in them, a tenant served last that has nothing queued now, an
+// owner with nothing queued.
+func TestLeanRoundRobinAgrees(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	all := []string{"alice", "bob b", "carol", "dave:d", "erin", "-", "zed"}
+	for call := 0; call < 5000; call++ {
+		names := all[:1+rng.Intn(len(all))]
+		by, inflight := map[string][]caseReq{}, map[string]int{}
+		id := 0
+		for _, n := range names {
+			for k := rng.Intn(5); k > 0; k-- {
+				id++
+				by[n] = append(by[n], caseReq{fmt.Sprint("r", id), fmt.Sprint("k :", rng.Intn(8))})
+			}
+			inflight[n] = rng.Intn(4)
+		}
+		pick := func() string {
+			if rng.Intn(3) == 0 {
+				return ""
+			}
+			return all[rng.Intn(len(all))]
+		}
+		own := Owner{Tenant: pick(), Held: rng.Intn(3), Slots: 1 + rng.Intn(6)}
+		after, n := pick(), rng.Intn(7)
+		key := func(r caseReq) string { return r.key }
+		goPicked, goLast := RoundRobin(by, key, inflight, own, after, n)
+		leanPicked, leanLast := RoundRobinLean(by, key, inflight, own, after, n)
+		if !reflect.DeepEqual(goPicked, leanPicked) || goLast != leanLast {
+			t.Fatalf("call %d (after %q, n %d, own %+v, %v, in flight %v):\n go:   %v, last %q\n lean: %v, last %q",
+				call, after, n, own, by, inflight, goPicked, goLast, leanPicked, leanLast)
+		}
+	}
 }

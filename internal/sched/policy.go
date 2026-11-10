@@ -1,7 +1,10 @@
 // Package sched decides which model is on which card and feeds it
 // requests. This file is the whole scheduling algorithm: Decide (the cards)
-// and RoundRobin (the requests of a model that is up). driver.go applies
-// what they say. spec/Turns.tla is Decide's model, rule for rule ([Name]
+// and RoundRobin (the requests of a model that is up). The program runs
+// the same two functions from the Lean model, where the proofs are
+// (proof/Timeshare/Policy.lean, linked in by lean.go: DecideLean,
+// RoundRobinLean), and the tests hold these to those: this is the page to
+// read, and must say what that one does. spec/Turns.tla is Decide's model, rule for rule ([Name]
 // here is the action there), and doc/VERIFICATION.md describes both and
 // what TLC checks. Change the three together.
 //

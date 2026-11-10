@@ -326,12 +326,12 @@ Clients trust `/var/lib/gpu-timeshare/tls/timeshare.crt`.
 ## Building and testing
 
 ```
-nix-build                    # gpu-timeshare; the go tests run in the build (-A stub: the fake model server)
+nix-build                    # gpu-timeshare, the Lean scheduler linked in; the go tests run in the build (-A stub: the fake model server)
 nix-build -A tests.nixos     # VM: the module, sandboxed units, the OpenAI SDK over TLS
 nix-build -A tests.tla       # TLC: the scheduler's model starves no one (doc/VERIFICATION.md)
 nix-build -A tests.lean      # Lean: the proofs type-check, and the Lean model decides as the Go code does
-nix-build -A lean            # gpu-timeshare with the Lean model as its scheduler (linked in through cgo); same tests
-go test ./...                # the same go tests, no nix needed
+nix-build -A proof           # Lean: only the proofs (builds Mathlib when the store has none, which is long)
+nix-shell --run 'go test ./...'   # the same go tests; they link the Lean scheduler, which the shell provides
 ```
 
 The Go tests run the real API and scheduler against `gpu-timeshare-stub`, a

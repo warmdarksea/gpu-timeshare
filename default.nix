@@ -1,15 +1,18 @@
 # gpu-timeshare, for nix (not a flake):
 #
-#   nix-build                       gpu-timeshare (one command; -A stub is the fake model server the tests use)
+#   nix-build                       gpu-timeshare (one command; -A stub is the fake model server the tests use).
+#                                   Its scheduler is the Lean model of proof/, compiled and linked in (cgo).
 #   nix-build -A tests.nixos        a VM: the module, sandboxed model units, an OpenAI SDK client over TLS
 #   nix-build -A tests.lean         the Lean model (proof/) decides as the Go code does; -A proof checks the proofs
 #   nix-build -A tests.tla          TLC checks the scheduler's model (spec/): no flow starves
-#   nix-shell                       go, gopls
+#   nix-shell                       go, with the Lean scheduler to link: go test ./...
 #
 # The NixOS module is `module` (nix/module.nix). From another flake or
 # config:
-#   ts = import gpu-timeshare-src { inherit pkgs; };
+#   ts = import gpu-timeshare-src { inherit (pkgs.stdenv.hostPlatform) system; };
 #   imports = [ ts.module ];   services.gpu-timeshare.package = ts;
+# Leave `pkgs` to the pin below: the proofs are checked against one Lean
+# and one Mathlib, and another nixpkgs has others.
 {
   system ? builtins.currentSystem,
   pkgs ? import (builtins.fetchTarball {
@@ -19,6 +22,9 @@
 }:
 let
   inherit (pkgs) lib;
+
+  # what Lean's runtime links
+  leanLibs = [ pkgs.gmp pkgs.libuv pkgs.stdenv.cc.cc.lib ];
 
   gpu-timeshare = pkgs.buildGoModule {
     pname = "gpu-timeshare";
@@ -33,15 +39,35 @@ let
       ];
     };
     vendorHash = "sha256-oiFR2zSOSg5J4G78BuisXU4S/1/dqOZ4ZZRm0RSjJmA=";
-    env.CGO_ENABLED = "0";
     subPackages = [ "cmd/gpu-timeshare" ];
     ldflags = [ "-s" "-w" ];
+    # The scheduler is the Lean model (proof/, doc/VERIFICATION.md §8): its
+    # static library (`scheduler` below), linked in through cgo with Lean's
+    # runtime, so that the functions the theorems are about are the ones
+    # that run (internal/sched/lean.go).
+    buildInputs = leanLibs;
+    env.CGO_ENABLED = "1";
+    env.CGO_CFLAGS = "-I${pkgs.leanPackages.lean4}/include";
+    env.CGO_LDFLAGS = lib.concatStringsSep " " ([
+      "${gpu-timeshare.scheduler}/lib/libscheduler.a"
+      "-L${pkgs.leanPackages.lean4}/lib/lean"
+      "-lInit" "-lleanrt" "-lstdc++" "-lgmp" "-luv" "-lm" "-ldl" "-lpthread"
+    ] ++ map (l: "-Wl,-rpath,${lib.getLib l}/lib") leanLibs);
     # every package's tests, end to end included (the stub stands in for
-    # the model servers; a shell script for systemctl)
+    # the model servers; a shell script for systemctl). The test binaries,
+    # and the stub the tests build, are linked outside the wrapper that
+    # gives the installed one its rpath.
     checkPhase = ''
       runHook preCheck
+      export LD_LIBRARY_PATH=${lib.makeLibraryPath leanLibs}
       go test ./...
+      unset LD_LIBRARY_PATH
       runHook postCheck
+    '';
+    doInstallCheck = true;
+    installCheckPhase = ''
+      $out/bin/gpu-timeshare help > /dev/null 2>&1 || $out/bin/gpu-timeshare --help > /dev/null 2>&1 || {
+        $out/bin/gpu-timeshare help; exit 1; }
     '';
     passthru = {
       module = ./nix/module.nix;
@@ -51,6 +77,7 @@ let
         pname = "gpu-timeshare-stub";
         subPackages = [ "cmd/gpu-timeshare-stub" ];
         doCheck = false;
+        doInstallCheck = false;
         meta = old.meta // { mainProgram = "gpu-timeshare-stub"; };
       });
       # bin/sandbox-report, with its interpreter: what a process can reach
@@ -59,6 +86,23 @@ let
         mkdir -p $out/bin
         { echo "#!${pkgs.python3}/bin/python3"; tail -n +3 ${./bin/sandbox-report}; } > $out/bin/sandbox-report
         chmod 755 $out/bin/sandbox-report
+      '';
+      # libscheduler.a: the Lean model (proof/Timeshare/Policy.lean) and its
+      # text interface (Text.lean), compiled to C by Lean and to objects by
+      # cc. Neither file imports anything, so this needs Lean and not
+      # Mathlib -- which `proof` does, and which no binary cache has: a
+      # machine that only runs gpu-timeshare builds this in seconds and
+      # never the proofs. They are the same two files `proof` checks the
+      # theorems against.
+      scheduler = pkgs.runCommandCC "timeshare-scheduler" { nativeBuildInputs = [ pkgs.leanPackages.lean4 ]; } ''
+        mkdir -p Timeshare build/Timeshare $out/lib
+        cp ${./proof/Timeshare/Policy.lean} Timeshare/Policy.lean
+        cp ${./proof/Timeshare/Text.lean} Timeshare/Text.lean
+        for m in Policy Text; do
+          LEAN_PATH=build lean -o build/Timeshare/$m.olean -c build/$m.c Timeshare/$m.lean
+          $CC -c -O3 -DNDEBUG -fPIC -I${pkgs.leanPackages.lean4}/include -o build/$m.o build/$m.c
+        done
+        $AR rcs $out/lib/libscheduler.a build/Policy.o build/Text.o
       '';
       # The scheduler in Lean (proof/, doc/VERIFICATION.md §8): the model and the
       # proofs about it. Building it type-checks them; a `sorry` fails the build
@@ -77,55 +121,16 @@ let
         leanDeps = [ pkgs.leanPackages.mathlib ];
         meta.mainProgram = "timeshare-check";
       };
-      # gpu-timeshare with the Lean model as its scheduler: the model's static
-      # library (libScheduler.a, from `proof`) linked in through cgo, with
-      # Lean's runtime, so that the function the theorems are about is the one
-      # that runs (internal/sched/lean.go). The tests are the same, with the
-      # Lean scheduler deciding, and TestLeanAgrees holds it to Decide.
-      lean = pkgs.buildGoModule {
-        pname = "gpu-timeshare-lean";
-        inherit (gpu-timeshare) version src vendorHash;
-        subPackages = [ "cmd/gpu-timeshare" ];
-        tags = [ "leansched" ];
-        buildInputs = [ pkgs.gmp pkgs.libuv pkgs.stdenv.cc.cc.lib ];
-        env.CGO_ENABLED = "1";
-        env.CGO_CFLAGS = "-I${pkgs.leanPackages.lean4}/include";
-        env.CGO_LDFLAGS = lib.concatStringsSep " " [
-          "${gpu-timeshare.proof}/.lake/build/lib/libtimeshare_x2dmodel_Scheduler.a"
-          "-L${pkgs.leanPackages.lean4}/lib/lean"
-          "-lInit" "-lleanrt" "-lstdc++" "-lgmp" "-luv" "-lm" "-ldl" "-lpthread"
-          # the test binaries are linked outside the wrapper's reach
-          "-Wl,-rpath,${lib.getLib pkgs.gmp}/lib"
-          "-Wl,-rpath,${lib.getLib pkgs.libuv}/lib"
-          "-Wl,-rpath,${pkgs.stdenv.cc.cc.lib}/lib"
-
-        ];
-        # (the test binaries, and the stub the tests build, are linked outside
-        # the wrapper that gives the installed one its rpath)
-        checkPhase = ''
-          runHook preCheck
-          export LD_LIBRARY_PATH=${lib.makeLibraryPath [ pkgs.gmp pkgs.libuv pkgs.stdenv.cc.cc.lib ]}
-          go test -tags leansched ./...
-          unset LD_LIBRARY_PATH
-          runHook postCheck
-        '';
-        doInstallCheck = true;
-        installCheckPhase = ''
-          $out/bin/gpu-timeshare help > /dev/null 2>&1 || $out/bin/gpu-timeshare --help > /dev/null 2>&1 || {
-            $out/bin/gpu-timeshare help; exit 1; }
-        '';
-        meta = gpu-timeshare.meta;
-
-      };
       # every round of a few hundred simulated worlds: what Go's Decide was
-
       # given and what it answered (internal/sched/cases_test.go)
       cases = gpu-timeshare.overrideAttrs (old: {
         pname = "gpu-timeshare-cases";
         buildPhase = ''
+          export LD_LIBRARY_PATH=${lib.makeLibraryPath leanLibs}
           TIMESHARE_CASES=$NIX_BUILD_TOP/cases go test ./internal/sched -run '^TestCases$'
         '';
         doCheck = false;
+        doInstallCheck = false;
         installPhase = "cp $NIX_BUILD_TOP/cases $out";
         dontFixup = true;
       });

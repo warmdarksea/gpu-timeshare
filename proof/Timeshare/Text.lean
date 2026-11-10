@@ -1,7 +1,8 @@
 /-
 The model's arguments and answer as text: what `Check.lean` reads from the
-Go tests, and what the Go program hands `timeshare_decide` when the Lean
-model is the scheduler (internal/sched/lean.go, `-tags leansched`).
+Go tests, and what the Go program hands `timeshare_decide` and
+`timeshare_roundrobin`: the Lean model is its scheduler
+(internal/sched/lean.go).
 
 One round:
 
@@ -144,5 +145,15 @@ def RRCase.run (c : RRCase) : List String × Option String :=
     (fun a b => a ≤ b) inflight c.own c.after c.n
   (picked.map (·.1), last)
 
-end Timeshare.Text
+/-- A call of `RoundRobin` as text in (`rr`, `rt`), the picks as text out
+(`rp`, `rl`): for a program that is not written in Lean. -/
+@[export timeshare_roundrobin]
+def roundRobinText (input : String) : String :=
+  let lines := (input.splitOn "\n").map fun l => (l.splitOn " ").filter (· ≠ "")
+  match lines.foldlM (fun (c : RRCase) ws => if ws = [] then pure c else c.add ws) {} with
+  | .error e => "error " ++ e ++ "\n"
+  | .ok c =>
+    let (picks, last) := c.run
+    String.join (picks.map fun p => "rp " ++ p ++ "\n") ++ "rl " ++ unopt last ++ "\n"
 
+end Timeshare.Text
