@@ -1112,5 +1112,7 @@ What it costs: the binary is not static (`CGO_ENABLED=1`; it needs libgmp,
 libuv and libstdc++ at run time, which nix gives it: 35 MB of closure with
 glibc), it carries Lean's runtime, `go test` needs the library (so:
 `nix-shell`), and each call copies its arguments into C memory and into
-Lean's and the answer back. And the package is tied to one Lean:
-`default.nix`'s own nixpkgs pin, not the caller's.
+Lean's and the answer back. And the package is compiled with whatever Lean
+the caller's nixpkgs has: the proofs were checked with 4.35 (the pin in
+`default.nix`), and with another the tests in the build are what vouch for
+the compiled scheduler.

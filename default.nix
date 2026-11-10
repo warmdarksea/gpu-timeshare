@@ -9,10 +9,12 @@
 #
 # The NixOS module is `module` (nix/module.nix). From another flake or
 # config:
-#   ts = import gpu-timeshare-src { inherit (pkgs.stdenv.hostPlatform) system; };
+#   ts = import gpu-timeshare-src { inherit pkgs; };
 #   imports = [ ts.module ];   services.gpu-timeshare.package = ts;
-# Leave `pkgs` to the pin below: the proofs are checked against one Lean
-# and one Mathlib, and another nixpkgs has others.
+# The scheduler is compiled with pkgs' Lean. The proofs were checked with
+# the Lean and Mathlib of the pin below (4.35); with another Lean, the Go
+# tests in the build still compare the compiled scheduler with the Go one,
+# and `-A proof` says whether the proofs go through there too.
 {
   system ? builtins.currentSystem,
   pkgs ? import (builtins.fetchTarball {

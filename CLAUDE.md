@@ -108,8 +108,9 @@ so a deployment never builds the proofs) and the driver calls `DecideLean`
 and `RoundRobinLean`. `Decide` and `RoundRobin` in `policy.go` stay as the
 page to read and as what `TestLeanAgrees` and `TestLeanRoundRobinAgrees`
 compare with: keep them in step. `go test` needs the library, so run it in
-`nix-shell`. A caller must not pass its own `pkgs`: the Lean and Mathlib
-the proofs are checked with are the pin's.
+`nix-shell`. A caller may pass its own `pkgs` (nornpkgs does): the
+scheduler is then compiled with that Lean, and the tests in the build are
+what vouch for it; the proofs were checked with the pin's (4.35).
 `nix-build -A proof` type-checks the Lean proofs; `nix-build -A tests.lean`
 also runs the Lean model on every round `TestCases` writes (seconds, once
 Mathlib is in the store: 1.6 GB).
