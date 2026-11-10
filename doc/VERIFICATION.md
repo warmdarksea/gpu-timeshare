@@ -585,24 +585,41 @@ a quantum old passes or drains (`progress_old`). So between one turn and
 the next there is only what the bound of §4.1 charges for: a load, a
 quantum, the requests in flight.
 
+**No starvation, on one card, in time** (`Proofs/Timed.lean`). Time is in
+ticks, and it moves only from a state in which a round would decide
+nothing, as in the TLA+ model (the scheduler has its say at every
+instant). A load takes at most *L* ticks, or fails; requests in flight on
+a draining card end within *D*.
+
+> **`wait_bound`.** While tenant *t* has requests queued for model *m*,
+> and until *m* is started, at most ***K*·*N*·(*L* + *Q* + *D*) ticks** go
+> by. *Q* is the longest quantum (`max_timeslice`, or `load_ratio` × *L*),
+> and at least one tick, so a quantum of zero is covered.
+
+So *m* is up within *K*·*N* turns and its own load: §4.1's formula for one
+card, without the extra *D* (the drain of the flow's own model, when
+there is one, is inside the first of the *K*·*N* turns). The proof is a
+budget: the time now, plus the turns that can still begin (`phi`) times
+the longest turn, plus the time left in the turn that is running. No step
+raises it (`step_budget`), and a tick lowers the time left by exactly
+one: there is always some left, because a state in which the scheduler
+would decide nothing has no free card, no drained card and no turn that
+is old (the progress theorems).
+
 The build fails on an unfinished proof (`assert_no_sorry`), and
 `tests.lean` fails if a module of `proof/` was not checked.
 
 ### 8.3 What is not proved yet
 
-1. **The bound in time.** `turns_bound` counts turns, and the progress
-   theorems say each one ends once its load, quantum and drain are over.
-   Putting the two together into "(*T*·*k*)·(*L* + *Q* + *D*) + *D* + *L*"
-   needs time in the system: that a load takes at most *L*, that requests
-   end within *D*, and how often a round runs. Not done.
+1. **More than one card.** `turns_bound` and `wait_bound` are for one. For
+   two there is TLC's evidence at small sizes, and §4.1 has no argument
+   for it.
 2. **The cap *T*·(*M* − 1)** of §4.1. Only *T*·*k* is proved.
-3. **More than one card.** `turns_bound` is for one. For two there is
-   TLC's evidence at small sizes, and §4.1 has no argument for it.
-4. **`NoWaste` for any number of cards**, and that the Lean model and the
+3. **`NoWaste` for any number of cards**, and that the Lean model and the
    Go code agree (that is a test, §8.1).
 
-Until then §4.1's bound in time, and anything about several cards, rests
-on TLC and on `TestNoStarvation`.
+Until then anything about several cards rests on TLC and on
+`TestNoStarvation`.
 
 ### 8.4 Running it
 

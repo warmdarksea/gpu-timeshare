@@ -645,6 +645,37 @@ theorem turns_bound {s s' : Sys T M C} {n K : Nat} (h : Trace N t m s n s')
   have h2 := phi_le N t m hw hK
   omega
 
+/-- New requests leave the flow waiting. -/
+theorem waiting_join {c : Card T M C} {l : Lines T M} {flows : List (Flow T M)} (hw : Waiting N t m c l)
+    (hq : hasFlow flows t m = true) (hfew : (l.join flows).tenants.length ≤ N) :
+    Waiting N t m c (l.join flows) :=
+  { nodup := join_nodup _ _
+    full := by
+      intro u hu
+      have hu' := mem_join_tenants.mp hu
+      simp only [hasQueued, List.any_eq_true, decide_eq_true_eq] at hu'
+      obtain ⟨f, hf, rfl⟩ := hu'
+      have : f.model ∈ (l.join flows).models f.tenant :=
+        mem_join_models.mpr (by
+          simp only [hasFlow, List.any_eq_true, decide_eq_true_eq]
+          exact ⟨f, hf, rfl, rfl⟩)
+      exact List.ne_nil_of_mem this
+    tenant := by
+      refine mem_join_tenants.mpr ?_
+      simp only [hasFlow, hasQueued, List.any_eq_true, decide_eq_true_eq] at hq ⊢
+      obtain ⟨f, hf, h1, _⟩ := hq
+      exact ⟨f, hf, h1⟩
+    model := mem_join_models.mpr hq
+    few := hfew
+    away := hw.away }
+
+theorem phi_join {c : Card T M C} {l : Lines T M} {flows : List (Flow T M)} (hw : Waiting N t m c l)
+    (hq : hasFlow flows t m = true) : phi N t m c (l.join flows) ≤ phi N t m c l := by
+  unfold phi
+  split
+  · exact pot_join _ _ hw.nodup hw.tenant hw.model hq
+  · exact pot_join _ _ hw.nodup hw.tenant hw.model hq
+
 end bound
 
 assert_no_sorry rule_single

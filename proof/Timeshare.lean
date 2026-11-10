@@ -8,3 +8,4 @@ import Timeshare.Proofs.Effect
 import Timeshare.Proofs.Potential
 import Timeshare.Proofs.Bound
 import Timeshare.Proofs.Progress
+import Timeshare.Proofs.Timed
