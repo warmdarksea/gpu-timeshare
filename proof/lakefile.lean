@@ -7,13 +7,14 @@ package «timeshare-model»
 -- never fetched or built by lake itself.
 require "leanprover-community" / "mathlib" @ git "main"
 
--- The scheduler itself: the model (Timeshare.Policy, which imports nothing)
--- and its text interface, which `timeshare-check` links. (The Go program
--- links the same two files as libscheduler.a, which default.nix builds
--- without lake and without Mathlib: `timeshare_decide` is `Decide`.)
+-- The scheduler itself: the model (Timeshare.Policy, which imports nothing),
+-- its interface as C functions (Timeshare.Export) and the text of the test
+-- cases, which `timeshare-check` links. (The Go program links Policy and
+-- Export with ffi/schedule.c as libschedule.a, which default.nix builds
+-- without lake and without Mathlib.)
 @[default_target]
 lean_lib Scheduler where
-  globs := #[.one `Timeshare.Policy, .one `Timeshare.Text]
+  globs := #[.one `Timeshare.Policy, .one `Timeshare.Export, .one `Timeshare.Text]
   defaultFacets := #[LeanLib.staticFacet]
 
 -- The proofs about it. Building this library is what type-checks them.

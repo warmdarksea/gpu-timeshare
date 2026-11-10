@@ -3,7 +3,10 @@ package sched
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +80,84 @@ func TestLeanRoundRobinAgrees(t *testing.T) {
 			t.Fatalf("call %d (after %q, n %d, own %+v, %v, in flight %v):\n go:   %v, last %q\n lean: %v, last %q",
 				call, after, n, own, by, inflight, goPicked, goLast, leanPicked, leanLast)
 		}
+	}
+}
+
+// Names are whatever they are: spaces, a dash, nothing at all (the one
+// card of a machine with no gpus setting has no name).
+func TestLeanNames(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pol := Policy{MaxTimeslice: time.Minute, LoadRatio: 1.5}
+	cards := []Card{
+		{ID: "", State: Up, Model: "big model", Owner: "al ice", Inflight: 1, TurnAt: now.Add(-time.Hour), BusyAt: now, Load: 7 * time.Second},
+		{ID: "card two"},
+	}
+	flows := []Flow{{"al ice", "big model", 3, 5}, {"-", "big model", 1, 6}, {"-", "ünï cödé", 2, 7}, {"bob\tb", "-", 4, 8}}
+	slots := map[string]int{"big model": 2, "ünï cödé": 1, "-": 3}
+	lines := Lines{Tenants: []string{"al ice"}, Models: map[string][]string{"al ice": {"big model"}}}
+	for round := 0; round < 4; round++ {
+		goActs, goLines := Decide(cards, flows, slots, lines, now, pol)
+		leanActs, leanLines := DecideLean(cards, flows, slots, lines, now, pol)
+		if len(goActs) == 0 && round == 0 {
+			t.Fatal("the round decides nothing: it tests nothing")
+		}
+		if !reflect.DeepEqual(goActs, leanActs) || !reflect.DeepEqual(goLines.Tenants, leanLines.Tenants) ||
+			!reflect.DeepEqual(goLines.Models, leanLines.Models) {
+			t.Fatalf("round %d:\n go:   %+v %v\n lean: %+v %v", round, goActs, goLines, leanActs, leanLines)
+		}
+		lines = goLines
+		now = now.Add(2 * time.Minute)
+	}
+}
+
+func rssKB(t *testing.T) int {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			n, _ := strconv.Atoi(strings.Fields(line)[1])
+			return n
+		}
+	}
+	t.Skip("no VmRSS")
+	return 0
+}
+
+// ffi/schedule.c counts Lean's references by hand, and a miscount is
+// silent: one too few and every call leaks its arguments or its answer,
+// one too many and Lean frees what is still in use. Many calls, then: the
+// process must not grow (a leak of one small object a call would be tens
+// of megabytes here), and must not crash.
+func TestLeanKeepsCount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pol := Policy{MaxTimeslice: time.Minute, LoadRatio: 1.5}
+	cards := []Card{
+		{ID: "0", State: Up, Model: "a", Owner: "alice", Inflight: 1, TurnAt: now.Add(-time.Hour), BusyAt: now, Load: 7 * time.Second},
+		{ID: "1"}, {ID: "2", State: Draining, Model: "b", Owner: "bob", Next: "c", Inflight: 2},
+	}
+	flows := []Flow{{"alice", "a", 3, 5}, {"bob", "c", 1, 6}, {"carol", "d", 2, 7}, {"carol", "a", 4, 8}}
+	slots := map[string]int{"a": 2, "b": 1, "c": 3, "d": 1}
+	lines := Lines{Tenants: []string{"alice", "bob"}, Models: map[string][]string{"alice": {"a"}, "bob": {"c"}}}
+	by := map[string][]caseReq{"alice": {{"r1", "k1"}, {"r2", "k2"}}, "bob": {{"r3", "k1"}, {"r4", "k3"}}, "carol": {{"r5", "k4"}}}
+	inflight := map[string]int{"alice": 1}
+	call := func(n int) {
+		for i := 0; i < n; i++ {
+			if acts, _ := DecideLean(cards, flows, slots, lines, now, pol); len(acts) == 0 {
+				t.Fatal("nothing decided")
+			}
+			if picked, last := RoundRobinLean(by, func(r caseReq) string { return r.key }, inflight, Owner{"bob", 0, 4}, "alice", 3); len(picked) != 3 || last == "" {
+				t.Fatalf("picked %v, last %q", picked, last)
+			}
+		}
+	}
+	call(20000) // whatever the allocators keep for themselves, they have by now
+	before := rssKB(t)
+	call(100000)
+	grown := rssKB(t) - before
+	t.Logf("%d kB more after 100,000 rounds", grown)
+	if grown > 8*1024 {
+		t.Fatalf("the process grew by %d kB over 100,000 rounds: something is not released", grown)
 	}
 }

@@ -47,9 +47,9 @@ let
     # that run (internal/sched/lean.go).
     buildInputs = leanLibs;
     env.CGO_ENABLED = "1";
-    env.CGO_CFLAGS = "-I${pkgs.leanPackages.lean4}/include";
+    env.CGO_CFLAGS = "-I${gpu-timeshare.scheduler}/include";
     env.CGO_LDFLAGS = lib.concatStringsSep " " ([
-      "${gpu-timeshare.scheduler}/lib/libscheduler.a"
+      "${gpu-timeshare.scheduler}/lib/libschedule.a"
       "-L${pkgs.leanPackages.lean4}/lib/lean"
       "-lInit" "-lleanrt" "-lstdc++" "-lgmp" "-luv" "-lm" "-ldl" "-lpthread"
     ] ++ map (l: "-Wl,-rpath,${lib.getLib l}/lib") leanLibs);
@@ -90,22 +90,25 @@ let
         { echo "#!${pkgs.python3}/bin/python3"; tail -n +3 ${./bin/sandbox-report}; } > $out/bin/sandbox-report
         chmod 755 $out/bin/sandbox-report
       '';
-      # libscheduler.a: the Lean model (proof/Timeshare/Policy.lean) and its
-      # text interface (Text.lean), compiled to C by Lean and to objects by
-      # cc. Neither file imports anything, so this needs Lean and not
-      # Mathlib -- which `proof` does, and which no binary cache has: a
-      # machine that only runs gpu-timeshare builds this in seconds and
-      # never the proofs. They are the same two files `proof` checks the
-      # theorems against.
-      scheduler = pkgs.runCommandCC "timeshare-scheduler" { nativeBuildInputs = [ pkgs.leanPackages.lean4 ]; } ''
-        mkdir -p Timeshare build/Timeshare $out/lib
+      # libschedule.a and schedule.h: the scheduler, for C. Three objects:
+      # the Lean model (proof/Timeshare/Policy.lean) and its interface as C
+      # functions (Export.lean: lean_ts_*), compiled to C by Lean, and
+      # ffi/schedule.c, which wraps those in plain C structs. Policy and
+      # Export import nothing, so this needs Lean and not Mathlib -- which
+      # `proof` does, and which no binary cache has: a machine that only
+      # runs gpu-timeshare builds this in seconds and never the proofs. They
+      # are the same files `proof` checks the theorems against.
+      scheduler = pkgs.runCommandCC "libschedule" { nativeBuildInputs = [ pkgs.leanPackages.lean4 ]; } ''
+        mkdir -p Timeshare build/Timeshare $out/lib $out/include
         cp ${./proof/Timeshare/Policy.lean} Timeshare/Policy.lean
-        cp ${./proof/Timeshare/Text.lean} Timeshare/Text.lean
-        for m in Policy Text; do
+        cp ${./proof/Timeshare/Export.lean} Timeshare/Export.lean
+        for m in Policy Export; do
           LEAN_PATH=build lean -o build/Timeshare/$m.olean -c build/$m.c Timeshare/$m.lean
           $CC -c -O3 -DNDEBUG -fPIC -I${pkgs.leanPackages.lean4}/include -o build/$m.o build/$m.c
         done
-        $AR rcs $out/lib/libscheduler.a build/Policy.o build/Text.o
+        $CC -c -O2 -fPIC -Wall -Wextra -Werror -I${./ffi} -I${pkgs.leanPackages.lean4}/include -o build/schedule.o ${./ffi/schedule.c}
+        $AR rcs $out/lib/libschedule.a build/Policy.o build/Export.o build/schedule.o
+        cp ${./ffi/schedule.h} $out/include/schedule.h
       '';
       # The scheduler in Lean (proof/, doc/VERIFICATION.md §8): the model and the
       # proofs about it. Building it type-checks them; a `sorry` fails the build

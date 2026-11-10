@@ -95,8 +95,15 @@ shell-script systemctl.
 `nix-build -A tests.tla`: TLC on the scheduler's model (a minute or two;
 `spec/big.cfg` by hand takes several).
 The scheduler that runs is the Lean model (the user's call, 2026-11-10: the
-Go-only build is retired). `internal/sched/lean.go` links `libscheduler.a`
-(`-A scheduler`: Policy.lean + Text.lean through Lean and cc, no Mathlib,
+Go-only build is retired). Three layers, each knowing only its neighbours
+(VERIFICATION.md §11): `proof/Timeshare/Export.lean` is the model's
+interface as C functions (`@[export lean_ts_*]`, scalars unboxed);
+`ffi/schedule.{h,c}` wraps those in plain C structs (`ts_*`; no Lean type
+in the header; no knowledge of Lean's layouts in the .c, only reference
+counts, which `TestLeanKeepsCount` watches); `internal/sched/lean.go` fills
+the structs. No strings-as-protocol: the user rejected the text interface
+this began with. `-A scheduler` is `libschedule.a` + `schedule.h` (Policy
+and Export through Lean and cc, plus schedule.c; no Mathlib,
 so a deployment never builds the proofs) and the driver calls `DecideLean`
 and `RoundRobinLean`. `Decide` and `RoundRobin` in `policy.go` stay as the
 page to read and as what `TestLeanAgrees` and `TestLeanRoundRobinAgrees`

@@ -727,7 +727,7 @@ Lean `roundRobin` is the one that runs, as `decide` is: §11.)
 
 **3. That the Lean model and the Go code agree.** That is a test (§8.1).
 It does not need to be true for the program to be right: the Lean model
-decides (§11), and what is unproved there is the text interface around
+decides (§11), and what is unproved there is the glue around
 it. The test keeps `policy.go` an honest page to read.
 
 
@@ -1005,59 +1005,112 @@ beside §2 and the TLA+, and what the tests compare the Lean functions
 with. The driver calls neither. (Until 2026-11-10 there were two builds,
 and the Go functions decided in the default one. That build is gone.)
 
-How it is put together:
+### 11.1 Three layers, and what each one knows
 
-- `proof/Timeshare/Policy.lean` (the model the theorems are about) and
-  `proof/Timeshare/Text.lean` (its arguments and answers as text) import
-  nothing. `nix-build -A scheduler` has Lean compile them to C and makes
-  `libscheduler.a` of the two objects. It needs Lean and not Mathlib, so
-  a machine that only runs gpu-timeshare never builds the proofs (no
-  binary cache has this Mathlib; building it takes a long time).
-  `Text.lean` exports two functions: `timeshare_decide` (a round as text
-  in, the actions and the lines as text out) and `timeshare_roundrobin`
-  (a model's queued requests in, the picks out).
-- `internal/sched/lean.go` links that library and Lean's runtime through
-  cgo. `DecideLean` writes `Decide`'s arguments as the text of §8.1 and
-  reads the answer; `RoundRobinLean` does the same for `RoundRobin`. The
-  log says so at start-up ("the scheduler is the lean one").
-- All of Lean's calls are made by one goroutine locked to its thread,
-  which the runtime needs.
-- `nix-build -A proof` checks the theorems against the same two files.
+```
+internal/sched/lean.go         Go's values  <->  C structs          (cgo)
+ffi/schedule.h, schedule.c     C structs    <->  Lean's values      (C, lean.h)
+proof/Timeshare/Export.lean    C's types    <->  the model's types  (Lean)
+proof/Timeshare/Policy.lean    decide, roundRobin: what the theorems are about
+```
+
+- **`Export.lean`** is the model's own interface as C functions, each
+  `@[export lean_ts_...]`: a constructor for every structure that goes in
+  (`lean_ts_card`, `lean_ts_flow`, `lean_ts_slots`, `lean_ts_line`,
+  `lean_ts_policy`, `lean_ts_queue`, `lean_ts_owner`, and `lean_ts_opt`
+  for an `Option`), `lean_ts_decide` and `lean_ts_round_robin`, and a
+  projection for every field that comes out (`lean_ts_action_kind`, ...).
+  The types are C's where the model's would have to be built by hand:
+  `UInt64` for `Nat`, `UInt8` for a card's state and an action's kind,
+  `Array` for `List`, an array of pairs for the function `slots`. Lean
+  passes those unboxed, so the C signatures are what they look like:
+
+  ```c
+  lean_object *lean_ts_card(lean_object *id, uint8_t st, lean_object *model, lean_object *owner,
+                            lean_object *next, uint64_t inflight, uint64_t turn_at,
+                            uint64_t busy_at, uint64_t load);
+  lean_object *lean_ts_decide(lean_object *cards, lean_object *flows, lean_object *slots,
+                              lean_object *lines, uint64_t now, lean_object *policy);
+  uint8_t      lean_ts_action_kind(lean_object *action);
+  ```
+
+  The names are prefixed `lean_ts_` and not `lean_`, which is the Lean
+  runtime's own (`lean_dec` is already something).
+- **`ffi/schedule.h`** is the scheduler for a C program: `ts_card`,
+  `ts_flow`, `ts_round`, `ts_decision` and the rest are plain structs,
+  strings are `const char *` with NULL for "none", and there are five
+  functions: `ts_init`, `ts_decide`, `ts_decision_free`, `ts_round_robin`,
+  `ts_picks_free`. No Lean type appears in it. **`schedule.c`** builds the
+  Lean values from the structs through the constructors, calls the model,
+  and copies the answer out through the projections into one `malloc`ed
+  block. It knows nothing of how Lean lays out a structure: only strings
+  and arrays, through `lean.h`. What it must get right by hand is whose
+  each object is (an exported function consumes its arguments; Lean does
+  not allow one to borrow).
+- **`lean.go`** fills the structs from Go's values in C memory, makes the
+  call on the one thread Lean's runtime was started on, and reads the
+  answer.
+
+There is no text and no parsing anywhere on the way. (There was, at
+first: a round written as lines of words, read by a parser in Lean. A name
+with a space in it could not be carried and that round went to Go's
+`Decide`, and a number that did not parse was not refused. Both are gone
+with it.)
+
+### 11.2 How it is built
+
+- `nix-build -A scheduler` is `libschedule.a` and `schedule.h`: Lean
+  compiles `Policy.lean` and `Export.lean` to C, cc compiles those and
+  `schedule.c` (`-Wall -Wextra -Werror`), and the three objects are the
+  library. The two Lean files import nothing, so this needs Lean and not
+  Mathlib: a machine that only runs gpu-timeshare never builds the proofs
+  (no binary cache has this Mathlib; building it takes a long time).
+- The Go build links that library and Lean's runtime through cgo, and
+  includes only `schedule.h`. The log says so at start-up ("the scheduler
+  is the lean one").
+- `nix-build -A proof` checks the theorems against the same `Policy.lean`.
   Nothing in the build of the binary waits for it: run it (or `-A
   tests.lean`, which needs it) before a change to `Policy.lean` leaves
   the machine it was written on.
 
-What is and is not proved:
+### 11.3 What is and is not proved
 
 - The functions that decide are the ones `mwait_bound`, `settled`,
-  `step_owner` and the rest are about. Nothing stands between the
-  theorems and the decisions but Lean's compiler and runtime.
-- Not proved: `lean.go` (the text going in and coming out) and
-  `Text.lean`'s parsing; the driver, which applies the decisions and is
-  the model servers' `Env` only by reading; and that the real loads and
-  requests keep to *L* and *D*.
-- `TestLeanAgrees` checks `DecideLean` against `Decide` on every round of
-  60 simulated worlds, with fractional `load_ratio`s, and
-  `TestLeanRoundRobinAgrees` checks `RoundRobinLean` against `RoundRobin`
-  on 5,000 calls; every other Go test, the end-to-end ones and the VM
-  included, runs with the Lean scheduler deciding.
+  `step_owner` and the rest are about. Between the theorems and the
+  decisions stand Lean's compiler and runtime, and the three layers
+  above.
+- Not proved: those three layers. `Export.lean` is short and total (a
+  state that is not 1, 2 or 3 is `down`; `schedule.c` refuses one over 3
+  before it gets there). Nor the driver, which applies the decisions and
+  is the model servers' `Env` only by reading; nor that the real loads
+  and requests keep to *L* and *D*.
+- What checks the layers:
+  - `TestLeanAgrees`: `DecideLean` against `Decide` on every round of 60
+    simulated worlds, with fractional `load_ratio`s;
+  - `TestLeanRoundRobinAgrees`: `RoundRobinLean` against `RoundRobin` on
+    5,000 calls, with a tenant served last who has nothing queued now;
+  - `TestLeanNames`: names with spaces, a tab, a dash, non-ASCII letters,
+    and the card with no name;
+  - `TestLeanKeepsCount`: 100,000 rounds must not make the process grow.
+    A reference miscounted in `schedule.c` is otherwise silent; taking one
+    `lean_dec` out makes this test fail by 27 MB;
+  - `timeshare-check` (§8.1) calls the model through `Export.lean` too,
+    so its 90,000 rounds and 20,000 slot calls cover that layer from the
+    Lean side;
+  - every other Go test, the end-to-end ones and the VM included, runs
+    with the Lean scheduler deciding.
 
-What the text cannot carry is handled on the Go side:
+Two things the interface does not carry as they are:
 
 - a `load_ratio` that is not a whole number: each card's load is
-  multiplied before it goes in, as `Decide`'s quantum has it;
-- in `RoundRobinLean`, names: the model is handed each tenant's place in
-  the order of their names, and each key's place of first appearance, so
-  any name will do. A tenant served last that has nothing queued now is
-  stood for by the tenant before its place, which starts the round at the
-  same tenant;
-- in `DecideLean`, a name with a space in it: that round is left to Go's
-  `Decide`. Config names cannot have one; a client's name could. This is
-  the one place the Go algorithm still decides anything.
+  multiplied in Go before it goes in, as `Decide`'s quantum has it, and
+  the model is given a ratio of 1;
+- a negative number (the model's are naturals): `lean.go` sends 0. Go's
+  counts and times are never negative here; a time before 1970 would be.
 
 What it costs: the binary is not static (`CGO_ENABLED=1`; it needs libgmp,
 libuv and libstdc++ at run time, which nix gives it: 35 MB of closure with
-glibc), it carries Lean's runtime, `go test` needs the library (so: nix,
-or `CGO_CFLAGS`/`CGO_LDFLAGS` set as `default.nix` sets them), and each
-call is a string built, parsed, and parsed back. And the package is tied
-to one Lean: `default.nix`'s own nixpkgs pin, not the caller's.
+glibc), it carries Lean's runtime, `go test` needs the library (so:
+`nix-shell`), and each call copies its arguments into C memory and into
+Lean's and the answer back. And the package is tied to one Lean:
+`default.nix`'s own nixpkgs pin, not the caller's.

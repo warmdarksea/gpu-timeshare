@@ -1,64 +1,32 @@
 package sched
 
 // The scheduler, from the Lean model. proof/Timeshare/Policy.lean is the
-// algorithm the theorems of proof/Timeshare/Proofs are about; lake compiles
-// it to C and into a static library, and this file links that and calls it.
-// So the functions the proofs are about are the ones that run: DecideLean
-// and RoundRobinLean are what the driver calls, and Decide and RoundRobin
+// algorithm the theorems of proof/Timeshare/Proofs are about. Lean compiles
+// it to C; libschedule.a is that, with a C face on it (ffi/schedule.h:
+// structs in, structs out), and this file links it and calls it. So the
+// functions the proofs are about are the ones that run: DecideLean and
+// RoundRobinLean are what the driver calls, and Decide and RoundRobin
 // (policy.go) are the same algorithm in Go, to read beside the English and
 // for the tests to compare with.
 //
-// What is not proved is this file: turning the arguments into the text the
-// model reads (proof/Timeshare/Text.lean) and its answer back.
-// TestLeanAgrees and TestLeanRoundRobinAgrees check that against policy.go.
-
+// What is not proved is the way there and back: this file (Go's values
+// into schedule.h's structs), ffi/schedule.c (those into Lean's values) and
+// proof/Timeshare/Export.lean (Lean's values into the model's own types).
+// TestLeanAgrees and TestLeanRoundRobinAgrees check all three against
+// policy.go.
 //
 // The Lean runtime wants its calls on a thread it knows, so one goroutine,
 // locked to its thread, makes them all.
 
 /*
 #include <stdlib.h>
-#include <string.h>
-#include <lean/lean.h>
-
-extern void lean_initialize_runtime_module();
-extern void lean_internal_set_thread_stack_size(size_t);
-extern void lean_io_mark_end_initialization();
-extern lean_object* initialize_Timeshare_Text(uint8_t builtin);
-extern lean_object* timeshare_decide(lean_object*);
-extern lean_object* timeshare_roundrobin(lean_object*);
-
-static int ts_init(void) {
-	// Lean gives the thread it starts here a stack of 1 GB unless told
-	// otherwise; none of the scheduler runs on it. A machine with less
-	// memory than that refuses ("failed to create thread") and the program
-	// dies.
-	lean_internal_set_thread_stack_size((size_t)8 << 20);
-	lean_initialize_runtime_module();
-	lean_object* r = initialize_Timeshare_Text(1);
-	int ok = lean_io_result_is_ok(r);
-	lean_dec_ref(r);
-	if (ok) lean_io_mark_end_initialization();
-	return ok ? 0 : 1;
-}
-
-static char* ts_call(int fn, const char* in) {
-	lean_object* s = lean_mk_string(in);
-	lean_object* r = fn == 0 ? timeshare_decide(s) : timeshare_roundrobin(s);
-
-	char* out = strdup(lean_string_cstr(r));
-	lean_dec(r);
-	return out;
-}
+#include <schedule.h>
 */
 import "C"
 
 import (
-	"fmt"
 	"runtime"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -67,132 +35,165 @@ import (
 // Engine names the scheduler in use, for the log.
 const Engine = "lean"
 
-type leanCall struct {
-	fn  int // 0: timeshare_decide, 1: timeshare_roundrobin
-	in  string
-	out chan string
-}
-
 var (
 	leanOnce  sync.Once
-	leanCalls chan leanCall
+	leanCalls chan func()
 )
 
-// lean hands the model one call, as text: a round (fn 0) or a model's free
-// slots (fn 1).
-func lean(fn int, in string) string {
-
+// onLean runs f on the thread the Lean runtime was started on.
+func onLean(f func()) {
 	leanOnce.Do(func() {
-		leanCalls = make(chan leanCall)
-		ready := make(chan error)
+		leanCalls = make(chan func())
+		ready := make(chan bool)
 		go func() {
 			runtime.LockOSThread()
-			if C.ts_init() != 0 {
-				ready <- fmt.Errorf("the Lean scheduler did not initialize")
-				return
-			}
-			ready <- nil
-			for c := range leanCalls {
-				cin := C.CString(c.in)
-				cout := C.ts_call(C.int(c.fn), cin)
-
-				C.free(unsafe.Pointer(cin))
-				c.out <- C.GoString(cout)
-				C.free(unsafe.Pointer(cout))
+			ready <- C.ts_init() == 0
+			for f := range leanCalls {
+				f()
 			}
 		}()
-		if err := <-ready; err != nil {
-			panic(err)
+		if !<-ready {
+			panic("the Lean scheduler did not initialize")
 		}
 	})
-	c := leanCall{fn: fn, in: in, out: make(chan string, 1)}
-
-	leanCalls <- c
-	return <-c.out
+	done := make(chan struct{})
+	leanCalls <- func() { f(); close(done) }
+	<-done
 }
 
-// plain: the name can go into a line of words as it is.
-func plain(s string) bool {
-	return s != "" && s != "-" && !strings.ContainsAny(s, " \t\r\n")
+// cmem is the C memory one call's arguments live in: C must not be handed
+// memory of Go's that holds pointers.
+type cmem struct{ ptrs []unsafe.Pointer }
+
+func (m *cmem) free() {
+	for _, p := range m.ptrs {
+		C.free(p)
+	}
 }
 
-func nanos(t time.Time) int64 {
+func (m *cmem) str(s string) *C.char {
+	p := C.CString(s)
+	m.ptrs = append(m.ptrs, unsafe.Pointer(p))
+	return p
+}
+
+// opt is str, with "" as schedule.h's "none".
+func (m *cmem) opt(s string) *C.char {
+	if s == "" {
+		return nil
+	}
+	return m.str(s)
+}
+
+// array is n zeroed elements of the given size (nil for none).
+func (m *cmem) array(n int, size uintptr) unsafe.Pointer {
+	if n == 0 {
+		return nil
+	}
+	p := C.calloc(C.size_t(n), C.size_t(size))
+	m.ptrs = append(m.ptrs, p)
+	return p
+}
+
+func (m *cmem) strs(ss []string) **C.char {
+	p := (**C.char)(m.array(len(ss), unsafe.Sizeof((*C.char)(nil))))
+	out := unsafe.Slice(p, len(ss))
+	for i, s := range ss {
+		out[i] = m.str(s)
+	}
+	return p
+
+}
+
+// u64 is a count or a time for the model, which has no negative numbers.
+func u64[N int | int64 | time.Duration](n N) C.uint64_t {
+	if n < 0 {
+		return 0
+	}
+	return C.uint64_t(n)
+}
+
+func nanos(t time.Time) C.uint64_t {
 	if t.IsZero() {
 		return 0
 	}
-	return t.UnixNano()
+	return u64(t.UnixNano())
 }
 
-// DecideLean is Decide, by the Lean model. A name the text can't carry (a
-// space in it) is the one thing it leaves to Decide.
-func DecideLean(cards []Card, flows []Flow, slots map[string]int, lines Lines, now time.Time, pol Policy) ([]Action, Lines) {
-	ok := true
-	word := func(s string) string {
-		if s == "" {
-			return "-"
-		}
-		ok = ok && plain(s)
-		return s
+func goStrs(p **C.char, n C.size_t) []string {
+	var out []string
+	for _, s := range unsafe.Slice(p, int(n)) {
+		out = append(out, C.GoString(s))
 	}
-	var b strings.Builder
+	return out
+}
+
+// DecideLean is Decide, by the Lean model.
+func DecideLean(cards []Card, flows []Flow, slots map[string]int, lines Lines, now time.Time, pol Policy) ([]Action, Lines) {
+	var m cmem
+	defer m.free()
+
 	// the model's load_ratio is a whole number: each card's load comes
 	// multiplied already, as Decide's quantum has it
-	fmt.Fprintf(&b, "case %d %d 1 %d\n", nanos(now), int64(pol.MaxTimeslice), int64(pol.Idle))
-	for _, c := range cards {
-		fmt.Fprintf(&b, "card %s %s %s %s %s %d %d %d %d\n", word(c.ID), c.State, word(c.Model), word(c.Owner),
-			word(c.Next), c.Inflight, nanos(c.TurnAt), nanos(c.BusyAt), int64(time.Duration(pol.LoadRatio*float64(c.Load))))
+	round := C.ts_round{
+		n_cards: C.size_t(len(cards)), n_flows: C.size_t(len(flows)),
+		n_slots: C.size_t(len(slots)), n_lines: C.size_t(len(lines.Tenants)),
+		now:    nanos(now),
+		policy: C.ts_policy{max_timeslice: u64(pol.MaxTimeslice), load_ratio: 1, idle: u64(pol.Idle)},
 	}
-	for _, f := range flows {
-		fmt.Fprintf(&b, "flow %s %s %d %d\n", word(f.Tenant), word(f.Model), f.Queued, f.Oldest)
-	}
-	for m, n := range slots {
-		fmt.Fprintf(&b, "slot %s %d\n", word(m), n)
-	}
-	for _, t := range lines.Tenants {
-		fmt.Fprintf(&b, "line %s", word(t))
-		for _, m := range lines.Models[t] {
-			b.WriteString(" " + word(m))
+	round.cards = (*C.ts_card)(m.array(len(cards), C.sizeof_ts_card))
+	for i, c := range cards {
+		unsafe.Slice(round.cards, len(cards))[i] = C.ts_card{
+			id: m.str(c.ID), state: C.ts_state(c.State), model: m.opt(c.Model), owner: m.opt(c.Owner), next: m.opt(c.Next),
+			inflight: u64(c.Inflight), turn_at: nanos(c.TurnAt), busy_at: nanos(c.BusyAt),
+			load: u64(time.Duration(pol.LoadRatio * float64(c.Load))),
 		}
-		b.WriteString("\n")
 	}
-	if !ok {
-		return Decide(cards, flows, slots, lines, now, pol)
-	}
-	unword := func(s string) string {
-		if s == "-" {
-			return ""
+	round.flows = (*C.ts_flow)(m.array(len(flows), C.sizeof_ts_flow))
+	for i, f := range flows {
+		unsafe.Slice(round.flows, len(flows))[i] = C.ts_flow{
+			tenant: m.str(f.Tenant), model: m.str(f.Model), queued: u64(f.Queued), oldest: u64(f.Oldest),
 		}
-		return s
 	}
-	var acts []Action
-	out := Lines{Models: map[string][]string{}}
-	for _, line := range strings.Split(lean(0, b.String()), "\n") {
+	round.slots = (*C.ts_slots)(m.array(len(slots), C.sizeof_ts_slots))
+	i := 0
+	for name, n := range slots {
+		unsafe.Slice(round.slots, len(slots))[i] = C.ts_slots{model: m.str(name), slots: u64(n)}
+		i++
+	}
+	round.lines = (*C.ts_line)(m.array(len(lines.Tenants), C.sizeof_ts_line))
+	for i, t := range lines.Tenants {
+		ms := lines.Models[t]
+		unsafe.Slice(round.lines, len(lines.Tenants))[i] = C.ts_line{
+			tenant: m.str(t), models: m.strs(ms), n_models: C.size_t(len(ms)),
+		}
+	}
 
-		w := strings.Fields(line)
-		switch {
-		case len(w) == 0:
-		case w[0] == "act" && len(w) == 6:
-			kind, known := map[string]ActionKind{"start": Start, "stop": Stop, "drain": Drain, "pass": Pass}[w[1]]
-			if !known {
-				panic("the Lean scheduler answered " + line)
-			}
-			acts = append(acts, Action{Kind: kind, Card: w[2], Model: unword(w[3]), Tenant: unword(w[4]), For: unword(w[5])})
-		case w[0] == "out" && len(w) >= 2:
-			out.Tenants = append(out.Tenants, w[1])
-			if len(w) > 2 {
-				out.Models[w[1]] = w[2:]
-			}
-		default:
-			panic("the Lean scheduler answered " + line)
+	var d *C.ts_decision
+	onLean(func() { d = C.ts_decide(&round) })
+	if d == nil {
+		panic("the Lean scheduler could not decide the round")
+	}
+	defer C.ts_decision_free(d)
+
+	var acts []Action
+	for _, a := range unsafe.Slice(d.actions, int(d.n_actions)) {
+		// (C.GoString of NULL, schedule.h's "none", is "")
+		acts = append(acts, Action{Kind: ActionKind(a.kind), Card: C.GoString(a.card), Model: C.GoString(a.model),
+			Tenant: C.GoString(a.tenant), For: C.GoString(a.next)})
+	}
+	out := Lines{Models: map[string][]string{}}
+	for _, l := range unsafe.Slice(d.lines, int(d.n_lines)) {
+		t := C.GoString(l.tenant)
+		out.Tenants = append(out.Tenants, t)
+		if l.n_models > 0 {
+			out.Models[t] = goStrs(l.models, l.n_models)
 		}
 	}
 	return acts, out
 }
 
-// RoundRobinLean is RoundRobin, by the Lean model. The model is handed
-// numbers for names: each tenant with a request its place in the order of
-// their names, each key the place of its first appearance. So no name is
-// one the text can't carry.
+// RoundRobinLean is RoundRobin, by the Lean model.
 func RoundRobinLean[R any](byTenant map[string][]R, key func(R) string, inflight map[string]int, own Owner, after string, n int) ([]R, string) {
 	var tenants []string
 	for t, rs := range byTenant {
@@ -203,65 +204,36 @@ func RoundRobinLean[R any](byTenant map[string][]R, key func(R) string, inflight
 	if len(tenants) == 0 || n <= 0 {
 		return nil, ""
 	}
-	sort.Strings(tenants)
-	code := map[string]string{}
+	sort.Strings(tenants) // schedule.h: the queues in the order of their tenants' names
+
+	var m cmem
+	defer m.free()
+	queues := (*C.ts_queue)(m.array(len(tenants), C.sizeof_ts_queue))
 	for i, t := range tenants {
-		code[t] = fmt.Sprintf("t%09d", i)
-	}
-	// the tenant served last may have nothing queued now: whoever is before
-	// its place in the order stands for it
-	last := "-"
-	if i := sort.SearchStrings(tenants, after); i < len(tenants) && tenants[i] == after {
-		last = code[after]
-	} else if i > 0 {
-		last = code[tenants[i-1]]
-	}
-	owner := "-"
-	if c, ok := code[own.Tenant]; ok {
-		owner = c
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "rr %s %d %s %d %d\n", last, n, owner, own.Held, own.Slots)
-	var reqs []R
-	keys := map[string]int{}
-	for _, t := range tenants {
-		fmt.Fprintf(&b, "rt %s %d", code[t], inflight[t])
-		for _, r := range byTenant[t] {
-			k, seen := keys[key(r)]
-			if !seen {
-				k = len(keys)
-				keys[key(r)] = k
-			}
-			fmt.Fprintf(&b, " %d:%d", len(reqs), k)
-			reqs = append(reqs, r)
+		keys := make([]string, len(byTenant[t]))
+		for j, r := range byTenant[t] {
+			keys[j] = key(r)
 		}
-		b.WriteString("\n")
+		unsafe.Slice(queues, len(tenants))[i] = C.ts_queue{
+			tenant: m.str(t), inflight: u64(inflight[t]), keys: m.strs(keys), n_keys: C.size_t(len(keys)),
+		}
 	}
+	owner := C.ts_owner{tenant: m.opt(own.Tenant), held: u64(own.Held), slots: u64(own.Slots)}
+	last := m.opt(after)
+
+	var p *C.ts_picks
+	onLean(func() { p = C.ts_round_robin(queues, C.size_t(len(tenants)), owner, last, u64(n)) })
+	if p == nil {
+		panic("the Lean scheduler could not pick the requests")
+	}
+	defer C.ts_picks_free(p)
+
 	var picked []R
-	served := ""
-	for _, line := range strings.Split(lean(1, b.String()), "\n") {
-		w := strings.Fields(line)
-		switch {
-		case len(w) == 0:
-		case w[0] == "rp" && len(w) == 2:
-			i, err := strconv.Atoi(w[1])
-			if err != nil || i < 0 || i >= len(reqs) {
-				panic("the Lean scheduler answered " + line)
-			}
-			picked = append(picked, reqs[i])
-		case w[0] == "rl" && len(w) == 2 && w[1] == "-":
-		case w[0] == "rl" && len(w) == 2:
-			i, err := strconv.Atoi(strings.TrimPrefix(w[1], "t"))
-			if err != nil || i < 0 || i >= len(tenants) {
-				panic("the Lean scheduler answered " + line)
-			}
-			served = tenants[i]
-		default:
-			panic("the Lean scheduler answered " + line)
-		}
+	for _, k := range unsafe.Slice(p.picks, int(p.n_picks)) {
+		picked = append(picked, byTenant[tenants[k.queue]][k.request])
 	}
 	if len(picked) == 0 {
 		return nil, ""
 	}
-	return picked, served
+	return picked, C.GoString(p.last)
 }

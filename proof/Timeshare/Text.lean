@@ -1,8 +1,7 @@
 /-
-The model's arguments and answer as text: what `Check.lean` reads from the
-Go tests, and what the Go program hands `timeshare_decide` and
-`timeshare_roundrobin`: the Lean model is its scheduler
-(internal/sched/lean.go).
+The model's arguments and answers as text: what `Check.lean` reads from
+the Go tests. (Only that: the program calls the model through
+`Export.lean`, and so do the cases here.)
 
 One round:
 
@@ -11,15 +10,12 @@ One round:
     flow TENANT MODEL QUEUED OLDEST
     slot MODEL N
     line TENANT MODELS...            the lines before, in order
-
-and the answer:
-
-    act KIND CARD MODEL TENANT FOR   in order
+    act KIND CARD MODEL TENANT FOR   what was decided, in order
     out TENANT MODELS...             the lines after
 
 (It imports only the model: Mathlib has no objects to link against.)
 -/
-import Timeshare.Policy
+import Timeshare.Export
 
 namespace Timeshare.Text
 
@@ -57,15 +53,6 @@ def showKind : Kind → String
 def showAct (a : Action String String String) : String :=
   s!"{showKind a.kind} {a.card} {unopt a.model} {unopt a.tenant} {unopt a.next}"
 
-def toLines (l : List (String × List String)) : Lines String String :=
-  { tenants := l.map (·.1)
-    models := fun t => match l.find? (·.1 = t) with
-      | some p => p.2
-      | none => [] }
-
-def fromLines (l : Lines String String) : List (String × List String) :=
-  l.tenants.map fun t => (t, l.models t)
-
 /-- One line of the file into the case being read. -/
 def Case.add (c : Case) (ws : List String) : Except String Case :=
   match ws with
@@ -85,26 +72,12 @@ def Case.add (c : Case) (ws : List String) : Except String Case :=
   | "out" :: t :: ms => pure { c with out := c.out ++ [(t, ms)] }
   | _ => throw ("can't read: " ++ " ".intercalate ws)
 
-/-- What the model decides for the case: the actions, and the lines after. -/
+/-- What the model decides for the case: the actions, and the lines after.
+Through `Export.decideRound`, as the program calls it. -/
 def Case.decide (c : Case) : List String × List (String × List String) :=
-  let slots (m : String) : Nat := match c.slots.find? (·.1 = m) with
-    | some p => p.2
-    | none => 0
-  let (as, l) := Timeshare.decide c.cards c.flows slots (toLines c.lines) c.now c.pol
-  (as.map showAct, fromLines l)
-
-/-- A round as text in, the answer as text out: `Decide`, for a program
-that is not written in Lean. A line it cannot read is answered with
-`error ...` and nothing else. -/
-@[export timeshare_decide]
-def decideText (input : String) : String :=
-  let lines := (input.splitOn "\n").map fun l => (l.splitOn " ").filter (· ≠ "")
-  match lines.foldlM (fun (c : Case) ws => if ws = [] then pure c else c.add ws) {} with
-  | .error e => "error " ++ e ++ "\n"
-  | .ok c =>
-    let (acts, out) := c.decide
-    String.join (acts.map fun a => "act " ++ a ++ "\n") ++
-      String.join (out.map fun p => "out " ++ " ".intercalate (p.1 :: p.2) ++ "\n")
+  let d := Export.decideRound c.cards.toArray c.flows.toArray c.slots.toArray
+    (c.lines.map fun p => (p.1, p.2.toArray)).toArray c.now.toUInt64 c.pol
+  (d.actions.toList.map showAct, d.lines.toList.map fun p => (p.1, p.2.toList))
 
 /-- A call of `RoundRobin`, and what Go picked:
 
@@ -138,22 +111,13 @@ def RRCase.add (c : RRCase) (ws : List String) : Except String RRCase :=
 
 /-- What the model picks: the requests' ids, and the tenant served last. -/
 def RRCase.run (c : RRCase) : List String × Option String :=
-  let inflight (t : String) : Nat := match c.tenants.find? (·.1 = t) with
-    | some p => p.2.1
-    | none => 0
-  let (picked, last) := roundRobin (c.tenants.map fun p => (p.1, p.2.2)) (fun r : String × String => r.2)
-    (fun a b => a ≤ b) inflight c.own c.after c.n
-  (picked.map (·.1), last)
-
-/-- A call of `RoundRobin` as text in (`rr`, `rt`), the picks as text out
-(`rp`, `rl`): for a program that is not written in Lean. -/
-@[export timeshare_roundrobin]
-def roundRobinText (input : String) : String :=
-  let lines := (input.splitOn "\n").map fun l => (l.splitOn " ").filter (· ≠ "")
-  match lines.foldlM (fun (c : RRCase) ws => if ws = [] then pure c else c.add ws) {} with
-  | .error e => "error " ++ e ++ "\n"
-  | .ok c =>
-    let (picks, last) := c.run
-    String.join (picks.map fun p => "rp " ++ p ++ "\n") ++ "rl " ++ unopt last ++ "\n"
+  let queues := (c.tenants.map fun p => (p.1, p.2.1, (p.2.2.map (·.2)).toArray)).toArray
+  let p := Export.roundRobinQueues queues c.own c.after c.n.toUInt64
+  let id (r : Export.Req) : String := match c.tenants[r.queue]? with
+    | some t => match t.2.2[r.index]? with
+      | some q => q.1
+      | none => "?"
+    | none => "?"
+  (p.requests.toList.map id, p.last)
 
 end Timeshare.Text
