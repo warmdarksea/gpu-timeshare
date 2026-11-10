@@ -151,7 +151,13 @@ order in which they arrive.
 >
 > = min(*T*·*k*, *T*·(*M* − 1)) × (*L* + *Q* + *D*) + *D* + *L*
 >
-> unless the flow empties first, for any number of cards.
+> unless the flow empties first.
+
+On one card this is proved for every number of tenants and models
+(§8.2). On several cards it is what TLC found for two cards and small
+times (§6.5), and it is **not** proved; §8.3 explains why a turn on
+several cards may be longer than *L* + *Q* + *D* by the wait for the one
+card that may drain at a time.
 
 The last *D* + *L* is the flow's own drain (if its model was up and was
 drained with requests still queued) and its own load.
@@ -606,20 +612,100 @@ one: there is always some left, because a state in which the scheduler
 would decide nothing has no free card, no drained card and no turn that
 is old (the progress theorems).
 
+**No waste, on any number of cards** (`Proofs/NoWaste.lean`).
+
+> **`settled`.** When no rule applies: no draining card has finished; no
+> card is free while a model is lost or short; no card is free or idle
+> while a model is lost; no card has been idle for `idle`; and, unless a
+> card is draining, no turn can be taken: wherever a turn is old enough to
+> have a winner, the winner is the owner, staying.
+
+That is `NoWaste` of §4.5 and more, for every world (reachable or not).
+The one thing the scheduler waits for is a drain, because one card drains
+at a time.
+
+**No starvation, on any number of cards, counted in turns**
+(`Proofs/Multi.lean`, `MultiRule.lean`, `MultiBound.lean`). The system is
+the cards and the lines (`MSys`); a history (`MTrace`) is rounds of
+`decide` over all the cards and, between them, whatever the model servers
+do, each on its own card.
+
+> **`mturns_bound`.** Take a tenant *t* with requests queued for a model
+> *m*. In any history in which that flow stays queued and *m* is not
+> started, at most ***K*·*N* − 1 charged turns** begin. A turn is charged
+> if it begins while *t* holds no card (whoever it goes to), or if it is
+> *t*'s own.
+
+Why: while *t* holds no card, every card the scheduler hands out, on a
+free card or by passing a turn, goes to *t* or to a tenant that stood
+before *t* in the line and held no card either (`winner_first`, and the
+same for `claim`). There are fewer than *N* of those, and once one of
+them holds a card it is not one of them again: when its turn ends it goes
+behind *t*. And each turn of *t*'s own starts its first lost model, which
+is *m* or stood before *m* in its line; there are fewer than *K* of those,
+and a model that leaves a card goes behind *m*.
+
+What `mturns_bound` does **not** say is how long *t* can hold a card on
+another model while *m* waits. Turns that begin for other tenants during
+that time are not charged, so they are not bounded. On one card that time
+is one turn, and `wait_bound` covers it. On several cards see §8.3.
+
 The build fails on an unfinished proof (`assert_no_sorry`), and
 `tests.lean` fails if a module of `proof/` was not checked.
 
 ### 8.3 What is not proved yet
 
-1. **More than one card.** `turns_bound` and `wait_bound` are for one. For
-   two there is TLC's evidence at small sizes, and §4.1 has no argument
-   for it.
-2. **The cap *T*·(*M* − 1)** of §4.1. Only *T*·*k* is proved.
-3. **`NoWaste` for any number of cards**, and that the Lean model and the
-   Go code agree (that is a test, §8.1).
+**1. A bound in time for a flow on several cards.** This is the gap. What
+is known:
 
-Until then anything about several cards rests on TLC and on
-`TestNoStarvation`.
+- While *t* holds no card, `mturns_bound` bounds the turns, and each
+  comes within a turn's time of the last; that part can be done as
+  `wait_bound` was, with the time left taken over all cards. (Not written
+  yet.)
+- While *t* holds a card on another model and *m* waits, *t*'s turn on
+  that card has to end. `settled` gives the first half: once that turn is
+  old, a state in which the scheduler would decide nothing has a card
+  draining, because *t* would win its own card and move. The second half
+  is how many drains can come before *t*'s card's. The rule is "from the
+  owner with the most cards, the oldest turn first", and one card drains
+  at a time. By hand: a card goes before *t*'s if its owner holds more
+  cards than *t*, or as many and an older turn. A card that has drained
+  and restarted has a newer turn, so the "as many and older" ones go at
+  most once each (fewer than *G*). The "more cards" ones lose a card each
+  time, and a tenant can become one of them only by being handed a card
+  while holding exactly as many as *t* and standing before it, which it
+  does at most once before it stands behind *t*. That makes at most about
+  2·*G* + *N* drains, each at most *D*, before *t*'s card drains, unless
+  *t* loses another card first, which restarts the count at most *G*
+  times.
+
+  So the conjecture for several cards is a turn of at most *L* + *Q* +
+  (a small polynomial in *G* and *N*)·*D*, not *L* + *Q* + *D*: the wait
+  for the drain slot is new, and it is real. TLC's two-card runs (§6.5)
+  could not show it: with two cards and *D* of 1 or 2 it is small.
+  Neither the argument nor the bound is machine-checked.
+
+  Two changes to the algorithm would make this simple, and both are for
+  the owner of the algorithm to decide, because they trade something:
+
+  - *Oldest turn first*, dropping "most cards first". Then at most *G* − 1
+    drains come before any old card's, and a turn is at most
+    *L* + *Q* + *G*·*D*. Cost: a claimant may take a poor owner's only
+    card while a rich owner's is also old, which costs one extra swap
+    before the cards are even again.
+  - *Drains in parallel, each reserved for the claim it is for.* Then no
+    card waits for another's drain, and a turn is *L* + *Q* + *D* on any
+    number of cards. Cost: a draining card has to remember whom it drains
+    for (new state in the driver, the spec and the model), and a free
+    card is no longer simply the best claim's.
+
+**2. The cap *T*·(*M* − 1)** of §4.1. Only *T*·*k* is proved.
+
+**3. That the Lean model and the Go code agree.** That is a test (§8.1);
+§11 is the plan to make it true by construction.
+
+Until then a bound in time on several cards rests on TLC at two cards and
+on `TestNoStarvation`.
 
 ### 8.4 Running it
 

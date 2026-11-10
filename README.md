@@ -270,11 +270,13 @@ models, and check that one tick under the bound is violated.
 `proof/` is the algorithm once more, in Lean 4, with machine-checked
 proofs. For any number of tenants, models and cards: no rule
 stops a card that is answering, no turn is cut short, and a
-round ends within three decisions a card. For one card and any number of
-tenants and models: a waiting flow sees at most *T*·*k* turns begin before
-its own, and the scheduler never sits on a decision (the bound in time,
-and several cards, are not proved
-yet). `nix-build -A tests.lean` checks them and runs the Lean model
+round ends within three decisions a card, and when the scheduler decides
+nothing no card is free or idle that a waiting model could have. For one
+card: a waiting flow has its model started within *T*·*k* turns, in turns
+and in time, for any quantum, zero included. For any number of cards: at
+most *T*·*k* turns begin that are the waiting tenant's own or begin while
+it holds no card. (Not proved: a bound in time on several cards; see
+doc/VERIFICATION.md §8.3.) `nix-build -A tests.lean` checks them and runs the Lean model
 against 90,000 rounds of the Go code's own decisions.
 `TestNoStarvation` checks the same things against `Decide` itself in 200
 random worlds of up to three cards.

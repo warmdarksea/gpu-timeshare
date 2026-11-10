@@ -12,3 +12,4 @@ import Timeshare.Proofs.Timed
 import Timeshare.Proofs.Multi
 import Timeshare.Proofs.MultiRule
 import Timeshare.Proofs.MultiBound
+import Timeshare.Proofs.NoWaste
